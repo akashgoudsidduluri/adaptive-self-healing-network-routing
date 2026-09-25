@@ -293,6 +293,31 @@ class LabHandler(BaseHTTPRequestHandler):
                     payload.get("threshold"),
                     payload.get("protect"),
                 )
+            elif action == "learning_run":
+                result = SESSION.run_learning_topic(str(payload["topic"]))
+            elif action == "learning_step":
+                result = SESSION.learning_step(str(payload.get("step", "next")))
+            elif action == "challenge":
+                result = SESSION.challenge_mode(
+                    str(payload.get("mode", "state")),
+                    payload.get("challenge"),
+                    payload.get("key"),
+                    payload.get("value"),
+                )
+            elif action == "quiz":
+                result = SESSION.quiz_mode(
+                    str(payload.get("mode", "state")), payload.get("answer")
+                )
+            elif action == "demo":
+                result = SESSION.demo_mode(
+                    str(payload.get("mode", "state")), payload.get("demo")
+                )
+            elif action == "packet_journey":
+                result = SESSION.packet_journey(int(payload["packet_id"]))
+            elif action == "explain":
+                result = SESSION.explain(payload.get("packet_id"))
+            elif action == "report":
+                result = SESSION.network_report(str(payload.get("format", "json")))
             elif action == "console":
                 result = SESSION.console(str(payload["id"]), str(payload["command"]))
             else:

@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-266%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-308%20Passed-success)
 
 ## Overview
 
@@ -144,6 +144,12 @@ Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · S
 - `simulator.py` — Central engine: heartbeat monitoring, failure detection with measurable delay, automatic rerouting, active traffic flows, congestion/loss/bandwidth effects, simulation clock
 - `services_security.py` — **Stage 10 service and security layer** attached to the same simulator: DHCP, DNS, HTTP, FTP, SMTP services, device service registry, stateful firewall, standard/extended ACLs, port filtering, simulated ARP spoofing and conflict detection, and controlled flood generation/detection
 - `test_stage10.py` — Stage 10 acceptance tests (DHCP, DNS, HTTP, FTP, SMTP, firewall, ACL, ARP, flood, integration, CLI)
+- `learning.py` — **Stage 11 learning mode**: topic catalog, real-simulation demonstrations, protocol step mode, packet journey, failure explanations
+- `challenges.py` — **Stage 11 challenge mode**: broken-network challenges, rule-based evaluation, progressive hints, attempt tracking
+- `quiz.py` — **Stage 11 quiz mode**: concept question bank plus questions generated from the live topology
+- `demos.py` — **Stage 11 demonstration scenarios**: 18 one-click scenarios with full reset
+- `report.py` — **Stage 11 overview, rule-based health, and report export** (JSON, Markdown, CSV, DataFrame)
+- `test_stage11.py` — Stage 11 validation suite
 - `lab_session.py` — Editable lab session: topology CRUD, presets, traffic, faults, undo/redo, JSON import/export, diagnostics, and real simulator step state
 - `lab_server.py` — Dependency-free HTTP API/static server for the primary network laboratory
 - `lab_frontend/` — Interactive SVG topology workbench: palette, drag/drop, connections, contextual inspectors, packet animation, queue, timeline, and console
@@ -792,7 +798,8 @@ Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 diagnostic
 tests in `test_stage8.py`; the original transport suite adds 31 tests in
 `test_transport.py`; Stage 9 adds 33 transport acceptance tests in
 `test_stage9.py`; and Stage 10 adds 59 service and security acceptance tests in
-`test_stage10.py`. The complete repository suite is 266 passing tests.
+`test_stage10.py`; and Stage 11 adds 42 learning/evaluation acceptance tests in
+`test_stage11.py`. The complete repository suite is 308 passing tests.
 
 
 ## Stage 9 — TCP + UDP Transport Layer Simulation
@@ -1218,6 +1225,176 @@ exported through the existing state/experiment framework in
   teaching detector and makes no claim about production intrusion detection.
 - Flood thresholds are compared against simulated arrival rates inside the
   simulator clock, not against real NIC counters.
+
+
+## Stage 11 — Learning Mode, Interactive Evaluation & Final Polish
+
+Stage 11 turns NetAdapt into a complete **Interactive Computer Networks
+Learning & Evaluation Laboratory**. It adds a learning mode whose
+demonstrations run the real simulator, a step-by-step protocol mode, a packet
+journey inspector, a "why did this fail?" explanation system, challenge mode
+with rule-based evaluation and progressive hints, a quiz mode with live
+topology questions, 18 one-click demonstration scenarios, a rule-based network
+health model, a final report with CSV/DataFrame export, CLI help, and friendly
+error messages.
+
+> NetAdapt is a simulation and educational system. It never generates real
+> network traffic: no socket is opened to a real service, no real web/FTP/mail
+> server is contacted, and the ARP-spoofing and flood scenarios only change
+> simulated state inside the simulator.
+
+### Learning Mode
+
+`learning.py` provides 40 topics across seven categories — NETWORK BASICS,
+DATA LINK, NETWORK LAYER, TRANSPORT, APPLICATION, SECURITY, and QoS. Every
+topic states the **concept**, **why it is needed**, **how it works**, the
+**NetAdapt demonstration**, and **what to observe**.
+
+Each demonstration executes the real simulator (real packets, real routes, real
+events), for example the TCP three-way handshake:
+
+```
+CLIENT                     SERVER
+  |------- SYN ------------>|   step 1
+  |<------ SYN-ACK ---------|   step 2
+  |------- ACK ------------>|   step 3
+  |==== ESTABLISHED ========|
+```
+
+```python
+from learning import LearningMode
+mode = LearningMode(seed=42)
+result = mode.run("tcp_handshake")
+result["steps"]      # the real TCP_* events, in order
+result["metrics"]    # real simulator metrics for the run
+```
+
+### Protocol step mode
+
+`Previous / Next / Play / Pause / Reset` walk the real `EventLogger` output one
+event at a time. Every step shows the packet, source, destination, protocol,
+current device, route, event, and reason, taken from the simulator itself.
+
+```python
+mode.run("self_healing")
+mode.advance()   # -> {"position": 1, "current": {...}}
+mode.back()
+```
+
+### Packet journey and "why did this fail?"
+
+`build_packet_journey()` renders the per-hop story of a real packet (device,
+interface, timestamp, action, queue, route, result) and `explain_failure()`
+turns the actual drop/deny events into an explanation with the matching rule,
+ACL, port, or link.
+
+```
+R1   FORWARDED  eth0  8.10 ms
+R3   DROPPED    ACL_DENY
+```
+
+Drop reasons are mapped from real simulator state only: `FIREWALL_BLOCK`,
+`ACL_DENY`, `PORT_BLOCKED`, `FLOOD_PROTECTION`, `ARP_CONFLICT`, `NO_ROUTE`,
+`PACKET_LOSS`, `CONGESTION`, `SERVICE_STOPPED`, `INTERFACE_DOWN`, and more.
+
+### Challenge Mode
+
+Six challenges break a real network and evaluate rule-based success criteria
+against live simulator state. A challenge is only `PASS` when the network
+really satisfies every criterion:
+
+| Challenge | What must be fixed |
+| --------- | ------------------ |
+| PC1 cannot communicate with Server1 | interface, address, gateway, route, ping, 100% PDR |
+| HTTP works from PC1 but not PC2 | firewall/ACL policy for the blocked client |
+| Traffic must survive an R1-R2 failure | alternate route + student-started traffic |
+| VoIP must get priority during congestion | scheduler, class priority, delivered flow |
+| DNS resolution fails | service state and the A record |
+| ARP spoofing attack | detection enabled, conflict found, attacker identified |
+
+Hints are progressive, and hints used, attempts, and elapsed time are tracked.
+Because a challenge loads a topology preset, no state leaks between challenges.
+
+```python
+from lab_session import LabSession
+from challenges import ChallengeEngine
+session = LabSession(); engine = ChallengeEngine(session)
+engine.start("connectivity")
+session.configure_interface("PC1", "eth0", {"status": "UP"})
+session.console("PC1", "ipconfig /renew")
+engine.evaluate()["status"]   # "PASS"
+```
+
+### Quiz Mode
+
+22 concept questions (MCQ, true/false, identify protocol/packet/failure
+reason, routing table, packet capture, predict the next TCP packet) plus
+questions generated from the *current* topology (current route, bottleneck
+bandwidth, downed interface, most-matched firewall rule, current cwnd, ARP
+binding, running services). Every answer is followed by an explanation and the
+score is tracked.
+
+### Demonstration scenarios and reset
+
+18 one-click scenarios: basic ping, TCP handshake, UDP traffic, TCP loss and
+retransmission, congestion, link failure and self-healing, router failure and
+recovery, QoS under congestion, DHCP, DNS, HTTP, FTP, SMTP, firewall blocking,
+ACL blocking, ARP spoofing detection, flood detection, and a combined failure.
+Each loads a preset, configures conditions, runs a deterministic workload, and
+reports steps, events, metrics, and an explanation.
+
+`Reset Scenario` reloads the preset, which rebuilds the simulator and therefore
+clears topology state, interfaces, routes, queues, services, security state,
+transport flows, metrics, events, and packets.
+
+### Network overview and health
+
+The overview shows devices, links, flows, sent/delivered/lost packets, PDR,
+latency, throughput, congestion, failures, route changes, TCP connections, UDP
+flows, running services, blocked packets, and security alerts.
+
+Health is **rule based, not a score**. Each of the six categories (Connectivity,
+Routing, Performance, QoS, Services, Security) reports `HEALTHY`, `WARNING`, or
+`CRITICAL` together with the reason and the published thresholds used
+(PDR 95%/50%, congestion 0.30/0.70, queue length 50).
+
+### Final report
+
+`network_report()` builds a full report (topology, devices, interfaces,
+routing, traffic, QoS, transport, services, security, failures, recovery,
+challenges, quiz, overview, health) with three export formats:
+
+```python
+session.network_report("json")      # nested report
+session.network_report("markdown")  # readable summary
+session.network_report("csv")       # section/name/detail rows
+```
+
+`report_dataframe()` returns the same rows as a pandas DataFrame using the
+project's existing dependency — no new reporting library is introduced.
+
+### CLI and error handling polish
+
+`help`, `help ping`, `help show`, `help routing`, `help tcp`, `help dns`, plus
+consistent device/router/switch commands. Invalid input now answers like a
+network device instead of raising:
+
+```
+% Invalid IP address: 999.1
+% Command not supported on this device: show ip route is a router command
+% Command not supported: frobnicate (type 'help' for the available commands)
+% Interface does not exist: PC1 has no interface eth9
+```
+
+### Stage 11 limitations
+
+- Learning demonstrations rebuild a fresh deterministic simulator, so they do
+  not modify the topology the student is editing on the canvas.
+- The health model judges reachability, routing, measured loss/congestion, QoS
+  configuration, service state, and active security alerts; it is not a
+  capacity planner.
+- Live quiz questions are regenerated from the current state, so a quiz in
+  progress is tied to the topology it was started with.
 
 ## Known Limitations
 

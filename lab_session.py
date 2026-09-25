@@ -13,7 +13,24 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import json
 import re
 
+from challenges import ChallengeEngine
+from demos import DemoEngine
 from devices import NetworkInterface
+from learning import (
+    LearningMode,
+    TOPICS as LEARNING_TOPICS,
+    build_packet_journey,
+    explain_failure,
+)
+from quiz import QuizEngine
+from report import (
+    network_health,
+    network_overview,
+    network_report,
+    report_csv,
+    report_rows,
+    report_to_markdown,
+)
 from services_security import (
     DROP_ACL,
     DROP_ARP,
@@ -33,6 +50,31 @@ PALETTE_TYPES = (
     "access_point", "cloud", "internet",
 )
 TRAFFIC_TYPES = ("Emergency", "VoIP", "Video", "HTTP", "FTP")
+
+#: Static learning catalog (built once, reused by every session).
+LEARNING_CATEGORIES = LearningMode.categories()
+
+CLI_HELP: Dict[str, str] = {
+    "ping": "ping <ip> - ICMP echo request to an IP address; reports RTT and the path taken.",
+    "tracert": "tracert <ip> - hop-by-hop discovery using a limited TTL.",
+    "arp": "arp -a - show the simulated ARP cache of every device.",
+    "ipconfig": "ipconfig [/all|/renew|/release] - interface configuration, DHCP lease control.",
+    "route": "route print - show every router table plus host default gateways.",
+    "netstat": "netstat - show the simulated TCP connections and UDP flows.",
+    "nslookup": "nslookup <hostname> - resolve a name through the simulated DNS service.",
+    "show": "show interfaces|ip route|services|service <name>|firewall|access-lists|arp|"
+    "connections|security|running-config|mac address-table|vlan brief.",
+    "routing": "Routing: the adaptive router (Dijkstra or Bellman-Ford) recomputes paths when a "
+    "link or node fails. 'show ip route' shows the live table.",
+    "tcp": "TCP: SYN, SYN-ACK, ACK handshake, then ACKed segments with a sliding window, "
+    "timeouts, retransmissions, and congestion control. 'netstat' shows the connections.",
+    "dns": "DNS: A records on a simulated DNS server, queries over UDP/53, and a per-client "
+    "cache with TTL. 'nslookup <name>' resolves a hostname.",
+    "services": "Services: DHCP, DNS, HTTP, FTP, and SMTP are hosted by real devices. "
+    "'show services' and 'show service <name>' report their state.",
+    "security": "Security: the simulated firewall, interface ACLs, ARP spoofing detection, and "
+    "flood detection. 'show firewall', 'show access-lists', 'show security'.",
+}
 
 
 class LabError(ValueError):
@@ -55,6 +97,22 @@ class LabSession:
         self.transport_result: Optional[Dict[str, Any]] = None
         self.service_result: Optional[Dict[str, Any]] = None
         self.security_result: Optional[Dict[str, Any]] = None
+        # Stage 11 learning / challenge / quiz / demo state
+        self.challenge_answers: Dict[str, Dict[str, str]] = {}
+        self.challenge_marks: Dict[str, float] = {}
+        self.learning_result: Optional[Dict[str, Any]] = None
+        self.quiz_answers: Dict[str, Any] = {}
+        self.demo_result: Optional[Dict[str, Any]] = None
+        self.step_mode: Optional[Dict[str, Any]] = None
+        self.learning_catalog = LEARNING_CATEGORIES
+        self.learning = LearningMode(seed=seed)
+        self.challenges = ChallengeEngine(self)
+        self.quiz = QuizEngine(self)
+        self.demos = DemoEngine(self)
+        self.challenge_state: Optional[Dict[str, Any]] = None
+        self.quiz_state: Optional[Dict[str, Any]] = None
+        self.last_journey: Optional[Dict[str, Any]] = None
+        self.last_explanation: Optional[Dict[str, Any]] = None
         self._counter = 1
         self.simulator: NetworkSimulator
         self.load_preset("self_healing", record=False)
@@ -153,12 +211,21 @@ class LabSession:
         self.transport_result = None
         self.service_result = None
         self.security_result = None
+        self.learning_result = None
+        self.quiz_answers = {}
+        self.demo_result = None
+        self.step_mode = None
+        self.challenge_answers = {}
+        self.challenge_marks = {}
         self.simulator = NetworkSimulator(
             topology=topology,
             seed=seed,
             scheduler=str(settings.get("scheduler", "priority")),
             algorithm=str(settings.get("routing_algorithm", "dijkstra")),
         )
+        # QoS class priorities are process-wide; start every session from the
+        # defaults and only then apply the document's own configuration.
+        self.simulator.reset_traffic_priorities()
         if settings.get("routing_weights"):
             self.simulator.set_routing_weights(**settings["routing_weights"])
         if settings.get("qos_priorities"):
@@ -394,7 +461,12 @@ class LabSession:
             if device is None:
                 raise LabError(f"Unknown device: {name}")
             self._record()
-            interface = device.get_interface(interface_id)
+            try:
+                interface = device.get_interface(interface_id)
+            except KeyError as exc:
+                raise LabError(
+                    f"Interface does not exist: {name} has no interface {interface_id}"
+                ) from exc
             if values.get("ip_address"):
                 prefix = values.get("prefix")
                 interface.assign_ip(str(values["ip_address"]), int(prefix) if prefix is not None else None)
@@ -932,6 +1004,21 @@ class LabSession:
             if device is None:
                 raise LabError(f"Unknown device: {device_name}")
             normalized = " ".join(str(command).strip().split()).lower()
+            if normalized in {"help", "?"}:
+                lines = ["Available command groups:"]
+                for key in sorted(CLI_HELP):
+                    lines.append(f"  help {key:<10} {CLI_HELP[key]}")
+                return {"output": "\n".join(lines), "command": command}
+            if normalized.startswith("help "):
+                key = normalized.split(" ", 1)[1].strip()
+                text = CLI_HELP.get(key)
+                if text is None:
+                    return {
+                        "output": f"% No help topic for '{key}'. Try: "
+                        + ", ".join(sorted(CLI_HELP)),
+                        "command": command,
+                    }
+                return {"output": f"{key}: {text}", "command": command}
             stage10 = self._console_stage10(device_name, normalized)
             if stage10 is not None:
                 return {**stage10, "command": command}
@@ -977,11 +1064,17 @@ class LabSession:
                 return {"output": json.dumps(self.simulator.arp.to_dict(), indent=2), "command": command}
             if normalized == "show ip route":
                 if not device.is_router:
-                    raise LabError("show ip route is only available on routers")
+                    return {
+                        "output": "% Command not supported on this device: show ip route is a router command",
+                        "command": command,
+                        "success": False,
+                    }
                 table = self.simulator.routing_table(device_name)
                 return {"output": "\n".join([f"{e.destination_network}/{e.prefix} via {e.next_hop or 'DIRECT'} {e.outgoing_interface} metric {e.metric:g}" for e in table.entries]) or "No routes", "command": command}
             if normalized.startswith("ping "):
                 target_ip = normalized.split(" ", 1)[1]
+                if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", target_ip):
+                    return {"output": f"% Invalid IP address: {target_ip}", "command": command, "success": False}
                 target = next((d for d in self.simulator.topology.devices.values() if any(i.ip_address == target_ip for i in d.interfaces)), None)
                 if target is None:
                     return {"output": f"ping: cannot resolve {target_ip}", "command": command, "success": False}
@@ -989,12 +1082,19 @@ class LabSession:
                 return {"output": f"{target_ip} reachable: {result.rtt * 1000:.2f} ms, {result.hops} hops" if result.success else f"ping failed: {result.reason}", "command": command, "success": result.success}
             if normalized.startswith("tracert ") or normalized.startswith("traceroute "):
                 target_ip = normalized.split(" ", 1)[1]
+                if not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", target_ip):
+                    return {"output": f"% Invalid IP address: {target_ip}", "command": command, "success": False}
                 target = next((d for d in self.simulator.topology.devices.values() if any(i.ip_address == target_ip for i in d.interfaces)), None)
                 if target is None:
                     return {"output": f"target not found: {target_ip}", "command": command, "success": False}
                 result = self.simulator.ping(device_name, target.name)
                 return {"output": "\n".join(f"{index + 1}: {hop}" for index, hop in enumerate(result.route)) or "No route", "command": command, "success": result.success}
-            raise LabError(f"Unsupported command: {command}")
+            return {
+                "output": f"% Command not supported: {command.strip()} "
+                "(type 'help' for the available commands)",
+                "command": command,
+                "success": False,
+            }
 
     # ------------------------------------------------------------------
     # Stage 10 services and security controls
@@ -1327,6 +1427,155 @@ class LabSession:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Stage 11 learning, challenges, quiz, demos, and reporting
+    # ------------------------------------------------------------------
+    def learning_mode(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "categories": LEARNING_CATEGORIES,
+                "step_mode": self.learning.state(),
+                "result": deepcopy(self.learning_result),
+            }
+
+    def run_learning_topic(self, topic_id: str) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                result = self.learning.run(topic_id)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self.learning_result = result
+            self.step_mode = self.learning.state()
+            self.running = True
+            return self.state()
+
+    def learning_step(self, action: str) -> Dict[str, Any]:
+        with self.lock:
+            action = str(action).lower()
+            if action == "next":
+                self.learning.advance(1)
+            elif action == "previous":
+                self.learning.back(1)
+            elif action == "play":
+                self.learning.playing = True
+            elif action == "pause":
+                self.learning.playing = False
+            elif action == "reset":
+                self.learning.reset_steps()
+            else:
+                raise LabError(f"Unknown step action: {action}")
+            self.step_mode = self.learning.state()
+            return self.state()
+
+    def challenge_mode(self, action: str = "state", challenge_id: Optional[str] = None,
+                       key: Optional[str] = None, value: Optional[str] = None) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                if action == "start":
+                    result = self.challenges.start(str(challenge_id))
+                elif action == "reset":
+                    result = self.challenges.reset()
+                elif action == "hint":
+                    result = self.challenges.hint()
+                elif action == "answer":
+                    result = self.challenges.submit_answer(str(key), str(value))
+                elif action == "evaluate":
+                    result = self.challenges.evaluate()
+                else:
+                    result = self.challenges.state()
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self.challenge_state = result
+            return self.state()
+
+    def quiz_mode(self, action: str = "state", answer: Any = None) -> Dict[str, Any]:
+        with self.lock:
+            action = str(action).lower()
+            try:
+                if action == "start":
+                    result = self.quiz.start()
+                elif action == "submit":
+                    result = self.quiz.submit(answer)
+                elif action == "next":
+                    result = self.quiz.next_question()
+                else:
+                    result = self.quiz.state()
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self.quiz_state = result
+            return self.state()
+
+    def demo_mode(self, action: str = "state", demo_id: Optional[str] = None) -> Dict[str, Any]:
+        with self.lock:
+            action = str(action).lower()
+            try:
+                if action == "run":
+                    result = self.demos.run(str(demo_id))
+                elif action == "reset":
+                    result = self.demos.reset(demo_id)
+                elif action == "catalog":
+                    result = {"demos": DemoEngine.catalog()}
+                else:
+                    result = {"demos": DemoEngine.catalog(), "result": deepcopy(self.demo_result)}
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self.state()
+
+    def packet_journey(self, packet_id: int) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                journey = build_packet_journey(self.simulator, packet_id)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self.last_journey = journey
+            return self.state()
+
+    def explain(self, packet_id: Optional[int] = None,
+                result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Explain why a packet or request failed, from real event data."""
+
+        with self.lock:
+            packet = None
+            if packet_id is not None:
+                packet = next(
+                    (item for item in self.simulator.packets if item.packet_id == int(packet_id)),
+                    None,
+                )
+                if packet is None:
+                    raise LabError(f"Unknown packet: {packet_id}")
+            if result is None:
+                result = self.service_result if isinstance(self.service_result, dict) else None
+            if packet is None and result is None:
+                candidate = next(
+                    (item for item in reversed(self.simulator.packets)
+                     if item.delivery_status == "DROPPED"),
+                    None,
+                )
+                packet = candidate
+            explanation = explain_failure(self.simulator, packet, result)
+            self.last_explanation = explanation
+            return self.state()
+
+    def health_report(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "overview": network_overview(self),
+                "health": network_health(self),
+            }
+
+    def network_report(self, fmt: str = "json") -> Dict[str, Any]:
+        with self.lock:
+            report = network_report(self)
+            fmt = str(fmt).lower()
+            if fmt == "markdown":
+                return {"format": "markdown", "text": report_to_markdown(report)}
+            if fmt == "csv":
+                return {"format": "csv", "text": report_csv(report),
+                        "rows": report_rows(report)}
+            if fmt == "rows":
+                return {"format": "rows", "rows": report_rows(report)}
+            return {"format": "json", "report": report}
+
     def undo(self) -> Dict[str, Any]:
         with self.lock:
             if not self.history:
@@ -1475,6 +1724,21 @@ class LabSession:
                     **self.simulator.security_state(),
                     "result": deepcopy(self.security_result),
                 },
+                "overview": network_overview(self),
+                "health": network_health(self),
+                "learning": {
+                    "categories": LEARNING_CATEGORIES,
+                    "step_mode": self.learning.state(),
+                    "result": deepcopy(self.learning_result),
+                },
+                "challenges": deepcopy(self.challenge_state) or self.challenges.state(),
+                "quiz": deepcopy(self.quiz_state) or self.quiz.state(),
+                "demos": {
+                    "catalog": DemoEngine.catalog(),
+                    "result": deepcopy(self.demo_result),
+                },
+                "journey": deepcopy(self.last_journey),
+                "explanation": deepcopy(self.last_explanation),
                 "can_undo": bool(self.history),
                 "can_redo": bool(self.future),
             }
