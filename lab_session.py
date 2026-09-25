@@ -1,0 +1,644 @@
+"""Stateful backend session for the interactive NetAdapt network laboratory.
+
+The browser owns presentation and pointer interaction. This module owns the
+actual editable topology and delegates routing, QoS, self-healing, protocol,
+and metric behavior to the existing :class:`NetworkSimulator`.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from threading import RLock
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+import json
+import re
+
+from devices import NetworkInterface
+from simulator import NetworkSimulator
+from topology import NetworkTopology
+
+
+PALETTE_TYPES = (
+    "host", "pc", "laptop", "server", "printer", "router", "switch", "hub",
+    "access_point", "cloud", "internet",
+)
+TRAFFIC_TYPES = ("Emergency", "VoIP", "Video", "HTTP", "FTP")
+
+
+class LabError(ValueError):
+    """An invalid editor operation that can be returned to the frontend."""
+
+
+class LabSession:
+    """One user's editable lab and its live Python simulation."""
+
+    def __init__(self, seed: int = 42) -> None:
+        self.lock = RLock()
+        self.seed = seed
+        self.document: Dict[str, Any] = {}
+        self.history: List[Dict[str, Any]] = []
+        self.future: List[Dict[str, Any]] = []
+        self.running = False
+        self.speed = 1.0
+        self.last_packet: Optional[Dict[str, Any]] = None
+        self._counter = 1
+        self.simulator: NetworkSimulator
+        self.load_preset("self_healing", record=False)
+
+    # ------------------------------------------------------------------
+    # Topology construction and serialization
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _new_id(prefix: str) -> str:
+        value = re.sub(r"[^A-Za-z0-9_]", "", prefix) or "Device"
+        return f"{value}{LabSession._next_suffix(value, prefix)}"
+
+    @staticmethod
+    def _next_suffix(prefix: str, fallback: str) -> int:
+        # The caller owns the counter; this helper is replaced by _unique_name.
+        return 1
+
+    def _unique_name(self, requested: Optional[str], device_type: str) -> str:
+        base = requested or f"{device_type}_{self._counter}"
+        base = re.sub(r"[^A-Za-z0-9_-]", "", str(base)).strip() or device_type
+        if base not in self.simulator.topology.devices:
+            return base
+        index = 2
+        while f"{base}_{index}" in self.simulator.topology.devices:
+            index += 1
+        return f"{base}_{index}"
+
+    def _record(self) -> None:
+        self.history.append(deepcopy(self.document))
+        del self.history[:-50]
+        self.future.clear()
+
+    def _rebuild(self, document: Dict[str, Any]) -> None:
+        topology = NetworkTopology()
+        topology.clear()
+        self.document = deepcopy(document)
+        self.document.setdefault("version", 1)
+        self.document.setdefault("name", "Untitled Network")
+        self.document.setdefault("devices", [])
+        self.document.setdefault("links", [])
+        self.document.setdefault("settings", {})
+        self.document.setdefault("positions", {})
+        for item in self.document["devices"]:
+            self.document["positions"].setdefault(str(item["id"]), {"x": float(item.get("x", 200)), "y": float(item.get("y", 200))})
+        settings = self.document["settings"]
+        seed = int(settings.get("seed", self.seed))
+        self.seed = seed
+
+        for item in self.document["devices"]:
+            name = str(item["id"])
+            device_type = str(item.get("type", "host"))
+            topology.add_node(name, device_type)
+            device = topology.get_device(name)
+            if device is None:
+                continue
+            device.default_gateway = item.get("default_gateway")
+            device.set_status("UP")
+            # Replace the deterministic default interface only when the
+            # document contains serialized interface data. Presets with no
+            # interface payload retain the topology's deterministic default.
+            serialized_interfaces = item.get("interfaces", [])
+            if serialized_interfaces:
+                device.interfaces.clear()
+                for interface_data in serialized_interfaces:
+                    interface = NetworkInterface(
+                        interface_id=interface_data.get("interface_id", "eth0"),
+                        mac_address=interface_data.get("mac_address"),
+                        ip_address=interface_data.get("ip_address"),
+                        prefix=int(interface_data.get("prefix", 24)),
+                        status=interface_data.get("status", "UP"),
+                    )
+                    device.add_interface(interface)
+            if not device.interfaces:
+                device.add_interface(NetworkInterface("eth0"))
+
+        for link in self.document["links"]:
+            u, v = str(link["source"]), str(link["target"])
+            if u not in topology.devices or v not in topology.devices:
+                continue
+            topology.add_link(
+                u,
+                v,
+                latency=float(link.get("latency", 10.0)),
+                bandwidth=float(link.get("bandwidth", 100.0)),
+                packet_loss=float(link.get("packet_loss", 0.0)),
+                congestion=float(link.get("congestion", 0.0)),
+            )
+            edge = topology.graph[u][v]
+            edge["interface_a"] = link.get("interface_a", "eth0")
+            edge["interface_b"] = link.get("interface_b", "eth0")
+            edge["duplex"] = link.get("duplex", "Full")
+            if link.get("status", "UP") == "DOWN":
+                topology.fail_link(u, v)
+
+        self.simulator = NetworkSimulator(
+            topology=topology,
+            seed=seed,
+            scheduler=str(settings.get("scheduler", "priority")),
+            algorithm=str(settings.get("routing_algorithm", "dijkstra")),
+        )
+        if settings.get("routing_weights"):
+            self.simulator.set_routing_weights(**settings["routing_weights"])
+        if settings.get("qos_priorities"):
+            self.simulator.set_priority_config(settings["qos_priorities"])
+        if settings.get("wfq_weights"):
+            self.simulator.set_wfq_weights(settings["wfq_weights"])
+        self._counter = max(
+            [self._counter, len(self.simulator.topology.devices) + 1]
+        )
+
+    def export_document(self) -> Dict[str, Any]:
+        return deepcopy(self.document)
+
+    def export_json(self) -> str:
+        return json.dumps(self.export_document(), indent=2, sort_keys=True)
+
+    def import_document(self, document: Dict[str, Any], record: bool = True) -> Dict[str, Any]:
+        if not isinstance(document, dict) or not isinstance(document.get("devices"), list):
+            raise LabError("Topology JSON must contain a devices list")
+        if record:
+            self._record()
+        self._rebuild(document)
+        self.running = False
+        self.last_packet = None
+        return self.state()
+
+    def load_preset(self, key: str, record: bool = True) -> Dict[str, Any]:
+        if key not in PRESETS:
+            raise LabError(f"Unknown topology preset: {key}")
+        if record:
+            self._record()
+        self._rebuild(deepcopy(PRESETS[key]))
+        self.running = False
+        self.last_packet = None
+        return self.state()
+
+    def new_network(self, record: bool = True) -> Dict[str, Any]:
+        if record:
+            self._record()
+        self._rebuild({"version": 1, "name": "New Network", "devices": [], "links": [], "settings": {"seed": self.seed}})
+        self.running = False
+        self.last_packet = None
+        return self.state()
+
+    def _update_document(self) -> None:
+        topology = self.simulator.topology
+        devices = []
+        for name, device in topology.devices.items():
+            position = self.document.setdefault("positions", {}).get(name, {"x": 120, "y": 120})
+            devices.append({
+                "id": name,
+                "type": device.device_type,
+                "x": float(position.get("x", 120)),
+                "y": float(position.get("y", 120)),
+                "default_gateway": device.default_gateway,
+                "interfaces": [interface.to_dict() for interface in device.interfaces],
+            })
+        links = []
+        for u, v, edge in topology.graph.edges(data=True):
+            links.append({
+                "id": f"{u}--{v}",
+                "source": u,
+                "target": v,
+                "status": edge.get("status", "UP"),
+                "latency": float(edge.get("latency", 10.0)),
+                "bandwidth": float(edge.get("bandwidth", 100.0)),
+                "packet_loss": float(edge.get("packet_loss", 0.0)),
+                "congestion": float(edge.get("congestion", 0.0)),
+                "duplex": edge.get("duplex", "Full"),
+                "interface_a": edge.get("interface_a", "eth0"),
+                "interface_b": edge.get("interface_b", "eth0"),
+            })
+        self.document["devices"] = devices
+        self.document["links"] = links
+        self.document.setdefault("settings", {})["seed"] = self.simulator.seed
+        self.document["settings"]["routing_algorithm"] = self.simulator.get_router_algorithm()
+        self.document["settings"]["routing_weights"] = self.simulator.get_routing_weights()
+        self.document["settings"]["scheduler"] = self.simulator.scheduler_name
+        self.document["settings"]["qos_priorities"] = self.simulator.get_priority_config()
+        self.document["settings"]["wfq_weights"] = self.simulator.get_wfq_weights()
+
+    # ------------------------------------------------------------------
+    # Edit operations
+    # ------------------------------------------------------------------
+    def add_device(self, device_type: str, x: float, y: float, name: Optional[str] = None) -> Dict[str, Any]:
+        device_type = str(device_type).lower()
+        if device_type not in PALETTE_TYPES:
+            raise LabError(f"Unsupported device type: {device_type}")
+        with self.lock:
+            self._record()
+            self._counter += 1
+            device_name = self._unique_name(name, device_type)
+            self.simulator.topology.add_node(device_name, device_type)
+            self.document.setdefault("positions", {})[device_name] = {"x": float(x), "y": float(y)}
+            self._update_document()
+            return self.state()
+
+    def move_device(self, name: str, x: float, y: float) -> Dict[str, Any]:
+        with self.lock:
+            if name not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {name}")
+            self._record()
+            self.document.setdefault("positions", {})[name] = {"x": float(x), "y": float(y)}
+            return self.state()
+
+    def rename_device(self, old_name: str, new_name: str) -> Dict[str, Any]:
+        with self.lock:
+            if old_name not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {old_name}")
+            new_name = self._unique_name(new_name, "Device")
+            if new_name == old_name:
+                return self.state()
+            self._record()
+            topology = self.simulator.topology
+            device = topology.devices[old_name]
+            position = self.document.setdefault("positions", {}).pop(old_name, {"x": 200, "y": 200})
+            old_edges = []
+            for source, target, edge in topology.graph.edges(data=True):
+                if old_name in {source, target}:
+                    old_edges.append((source, target, dict(edge)))
+            topology.graph.remove_node(old_name)
+            topology.devices.pop(old_name, None)
+            device.name = new_name
+            topology.devices[new_name] = device
+            topology.graph.add_node(new_name, type=device.device_type, status=device.status)
+            for source, target, edge in old_edges:
+                new_source = new_name if source == old_name else source
+                new_target = new_name if target == old_name else target
+                topology.graph.add_edge(new_source, new_target, **edge)
+                for endpoint, neighbour in ((new_source, new_target), (new_target, new_source)):
+                    endpoint_device = topology.devices[endpoint]
+                    for interface in endpoint_device.interfaces:
+                        interface.associate_link(f"{endpoint}-{neighbour}")
+            self.document.setdefault("positions", {})[new_name] = position
+            for link in list(self.document.get("links", [])):
+                if link["source"] == old_name:
+                    link["source"] = new_name
+                if link["target"] == old_name:
+                    link["target"] = new_name
+            for flow in self.simulator.active_flows.values():
+                if flow.source == old_name:
+                    flow.source = new_name
+                if flow.destination == old_name:
+                    flow.destination = new_name
+                flow.current_route = [new_name if hop == old_name else hop for hop in flow.current_route]
+                flow.previous_route = [new_name if hop == old_name else hop for hop in flow.previous_route]
+                try:
+                    flow.current_route, flow.route_cost = self.simulator.router.shortest_path(self.simulator.topology, flow.source, flow.destination)
+                except ValueError:
+                    flow.current_route, flow.route_status, flow.status = [], "FAILED", "FAILED"
+            self._update_document()
+            return self.state()
+
+    def delete_device(self, name: str) -> Dict[str, Any]:
+        with self.lock:
+            if name not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {name}")
+            self._record()
+            self.simulator.topology.remove_node(name)
+            self.document.setdefault("positions", {}).pop(name, None)
+            for flow in self.simulator.active_flows.values():
+                if name in {flow.source, flow.destination} or name in flow.current_route:
+                    flow.status = "FAILED"
+                    flow.route_status = "FAILED"
+                    flow.current_route = []
+            self._update_document()
+            return self.state()
+
+    def duplicate_device(self, name: str) -> Dict[str, Any]:
+        with self.lock:
+            if name not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {name}")
+            original = self.simulator.topology.devices[name]
+            x = self.document.get("positions", {}).get(name, {}).get("x", 200) + 40
+            y = self.document.get("positions", {}).get(name, {}).get("y", 200) + 40
+            return self.add_device(original.device_type, x, y, f"{name}_copy")
+
+    def add_link(self, source: str, target: str, latency: float = 10.0, bandwidth: float = 100.0) -> Dict[str, Any]:
+        with self.lock:
+            topology = self.simulator.topology
+            if source == target or source not in topology.devices or target not in topology.devices:
+                raise LabError("Choose two different existing devices")
+            if topology.graph.has_edge(source, target):
+                raise LabError("Those devices are already connected")
+            self._record()
+            topology.add_link(source, target, latency=latency, bandwidth=bandwidth)
+            self._update_document()
+            return self.state()
+
+    def delete_link(self, source: str, target: str) -> Dict[str, Any]:
+        with self.lock:
+            if not self.simulator.topology.graph.has_edge(source, target):
+                raise LabError("Link does not exist")
+            self._record()
+            self.simulator.topology.remove_link(source, target)
+            for flow in self.simulator.active_flows.values():
+                if self.simulator._route_uses_link(flow.current_route, source, target):
+                    try:
+                        route, cost = self.simulator.router.shortest_path(self.simulator.topology, flow.source, flow.destination)
+                        flow.current_route, flow.route_cost, flow.route_status = route, cost, "REROUTED"
+                    except ValueError:
+                        flow.current_route, flow.route_status, flow.status = [], "FAILED", "FAILED"
+            self._update_document()
+            return self.state()
+
+    def configure_link(self, source: str, target: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            if not self.simulator.topology.graph.has_edge(source, target):
+                raise LabError("Link does not exist")
+            self._record()
+            self.simulator.set_link_conditions(
+                source,
+                target,
+                latency=float(values["latency"]) if values.get("latency") is not None else None,
+                bandwidth=float(values["bandwidth"]) if values.get("bandwidth") is not None else None,
+                packet_loss=float(values["packet_loss"]) if values.get("packet_loss") is not None else None,
+                congestion=float(values["congestion"]) if values.get("congestion") is not None else None,
+            )
+            if values.get("status") == "DOWN":
+                self.simulator.fail_link(source, target)
+            elif values.get("status") == "UP":
+                self.simulator.recover_link(source, target)
+            edge = self.simulator.topology.graph[source][target]
+            for key in ("duplex", "interface_a", "interface_b"):
+                if key in values:
+                    edge[key] = values[key]
+            self._update_document()
+            return self.state()
+
+    def configure_interface(self, name: str, interface_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            device = self.simulator.topology.get_device(name)
+            if device is None:
+                raise LabError(f"Unknown device: {name}")
+            self._record()
+            interface = device.get_interface(interface_id)
+            if values.get("ip_address"):
+                prefix = values.get("prefix")
+                interface.assign_ip(str(values["ip_address"]), int(prefix) if prefix is not None else None)
+            if values.get("mac_address"):
+                interface.mac_address = str(values["mac_address"]).upper()
+            if values.get("status") == "DOWN":
+                self.simulator.fail_interface(name, interface_id)
+            elif values.get("status") == "UP":
+                self.simulator.recover_interface(name, interface_id)
+            self._update_document()
+            return self.state()
+
+    def shutdown_device(self, name: str) -> Dict[str, Any]:
+        with self.lock:
+            self._record()
+            self.simulator.fail_node(name)
+            self._update_document()
+            return self.state()
+
+    def restart_device(self, name: str) -> Dict[str, Any]:
+        with self.lock:
+            self._record()
+            self.simulator.recover_node(name)
+            self._update_document()
+            return self.state()
+
+    # ------------------------------------------------------------------
+    # Simulation and diagnostics
+    # ------------------------------------------------------------------
+    def start_traffic(self, source: str, destination: str, packet_count: int = 10, pps: float = 5.0, traffic_type: str = "Video", packet_size: int = 1500) -> Dict[str, Any]:
+        with self.lock:
+            if source not in self.simulator.topology.devices or destination not in self.simulator.topology.devices:
+                raise LabError("Traffic source and destination must be existing devices")
+            if source == destination:
+                raise LabError("Traffic source and destination must be different")
+            if traffic_type not in TRAFFIC_TYPES:
+                raise LabError(f"Unsupported traffic type: {traffic_type}")
+            if int(packet_count) < 1 or int(packet_size) < 1 or float(pps) <= 0:
+                raise LabError("Packet count, packet size, and rate must be positive")
+            self.simulator.create_flow(source, destination, traffic_type, int(packet_count), int(packet_size), float(pps), float(packet_count) / max(pps, 0.1))
+            self.running = True
+            return self.state()
+
+    def step(self) -> Dict[str, Any]:
+        with self.lock:
+            before = len(self.simulator.event_logger.events)
+            packet = self.simulator.process_next_packet()
+            if packet is None:
+                if self.simulator._failed_links or self.simulator._failed_nodes:
+                    self.simulator.tick(max(0.1, self.simulator.heartbeat_interval))
+                else:
+                    self.running = False
+            else:
+                packet_events = [
+                    event.to_dict() for event in self.simulator.event_logger.events[before:]
+                    if event.details.get("packet_id") == packet.packet_id
+                ]
+                self.last_packet = {
+                    "id": packet.packet_id,
+                    "source": packet.source,
+                    "destination": packet.destination,
+                    "traffic_type": packet.traffic_type,
+                    "size": packet.size,
+                    "ttl": packet.ttl,
+                    "route": list(packet.route),
+                    "status": packet.delivery_status,
+                    "latency": packet.latency,
+                    "next_hop": packet.route[1] if len(packet.route) > 1 else None,
+                    "current_device": packet.destination if packet.delivery_status == "DELIVERED" else packet.source,
+                    "events": packet_events,
+                }
+            self._update_document()
+            return self.state()
+
+    def reset_simulation(self) -> Dict[str, Any]:
+        with self.lock:
+            self._record()
+            self.simulator.reset()
+            self.running = False
+            self.last_packet = None
+            return self.state()
+
+    def set_running(self, running: bool) -> Dict[str, Any]:
+        with self.lock:
+            self.running = bool(running)
+            return self.state()
+
+    def set_speed(self, speed: float) -> Dict[str, Any]:
+        with self.lock:
+            self.speed = max(0.25, min(10.0, float(speed)))
+            return self.state()
+
+    def set_scheduler(self, scheduler: str) -> Dict[str, Any]:
+        """Select the live queue scheduler used by subsequent packets."""
+        with self.lock:
+            self._record()
+            self.simulator.set_scheduler(scheduler)
+            self._update_document()
+            return self.state()
+
+    def set_qos_config(
+        self,
+        priorities: Optional[Dict[str, float]] = None,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Apply class priorities and/or WFQ weights to the live scheduler."""
+        with self.lock:
+            self._record()
+            if priorities is not None:
+                self.simulator.set_priority_config(
+                    {str(name): float(value) for name, value in priorities.items()}
+                )
+            if weights is not None:
+                self.simulator.set_wfq_weights(
+                    {str(name): float(value) for name, value in weights.items()}
+                )
+            self._update_document()
+            return self.state()
+
+    def set_routing_algorithm(self, algorithm: str) -> Dict[str, Any]:
+        with self.lock:
+            self._record()
+            self.simulator.set_router_algorithm(algorithm)
+            self._update_document()
+            return self.state()
+
+    def set_routing_weights(self, weights: Dict[str, float]) -> Dict[str, Any]:
+        with self.lock:
+            self._record()
+            self.simulator.set_routing_weights(**{str(k): float(v) for k, v in weights.items()})
+            self._update_document()
+            return self.state()
+
+    def console(self, device_name: str, command: str) -> Dict[str, Any]:
+        with self.lock:
+            device = self.simulator.topology.get_device(device_name)
+            if device is None:
+                raise LabError(f"Unknown device: {device_name}")
+            normalized = " ".join(str(command).strip().split()).lower()
+            if normalized in {"show interfaces", "show interface status"}:
+                lines = [f"{device_name} {device.device_type.upper()}"]
+                lines.extend(f"{i.interface_id}: {i.mac_address} {i.ip_address or 'unassigned'}/{i.prefix} [{i.status}]" for i in device.interfaces)
+                return {"output": "\n".join(lines), "command": command}
+            if normalized in {"ipconfig", "ifconfig"}:
+                lines = [f"{device_name} {device.device_type}"]
+                lines.extend(f"  {i.interface_id}: MAC {i.mac_address} IP {i.ip_address or 'unassigned'} mask {i.subnet_mask or 'n/a'} gateway {device.default_gateway or 'n/a'}" for i in device.interfaces)
+                return {"output": "\n".join(lines), "command": command}
+            if normalized in {"show arp", "arp -a"}:
+                return {"output": json.dumps(self.simulator.arp.to_dict(), indent=2), "command": command}
+            if normalized == "show ip route":
+                if not device.is_router:
+                    raise LabError("show ip route is only available on routers")
+                table = self.simulator.routing_table(device_name)
+                return {"output": "\n".join([f"{e.destination_network}/{e.prefix} via {e.next_hop or 'DIRECT'} {e.outgoing_interface} metric {e.metric:g}" for e in table.entries]) or "No routes", "command": command}
+            if normalized.startswith("ping "):
+                target_ip = normalized.split(" ", 1)[1]
+                target = next((d for d in self.simulator.topology.devices.values() if any(i.ip_address == target_ip for i in d.interfaces)), None)
+                if target is None:
+                    return {"output": f"ping: cannot resolve {target_ip}", "command": command, "success": False}
+                result = self.simulator.ping(device_name, target.name)
+                return {"output": f"{target_ip} reachable: {result.rtt * 1000:.2f} ms, {result.hops} hops" if result.success else f"ping failed: {result.reason}", "command": command, "success": result.success}
+            if normalized.startswith("tracert ") or normalized.startswith("traceroute "):
+                target_ip = normalized.split(" ", 1)[1]
+                target = next((d for d in self.simulator.topology.devices.values() if any(i.ip_address == target_ip for i in d.interfaces)), None)
+                if target is None:
+                    return {"output": f"target not found: {target_ip}", "command": command, "success": False}
+                result = self.simulator.ping(device_name, target.name)
+                return {"output": "\n".join(f"{index + 1}: {hop}" for index, hop in enumerate(result.route)) or "No route", "command": command, "success": result.success}
+            raise LabError(f"Unsupported command: {command}")
+
+    def undo(self) -> Dict[str, Any]:
+        with self.lock:
+            if not self.history:
+                return self.state()
+            self.future.append(self.export_document())
+            return self.import_document(self.history.pop(), record=False)
+
+    def redo(self) -> Dict[str, Any]:
+        with self.lock:
+            if not self.future:
+                return self.state()
+            self.history.append(self.export_document())
+            return self.import_document(self.future.pop(), record=False)
+
+    def state(self) -> Dict[str, Any]:
+        with self.lock:
+            self._update_document()
+            topology = self.simulator.topology
+            metrics = self.simulator.metrics.calculate(self.simulator.time, self.simulator.average_congestion(), len(self.simulator.active_flows))
+            queue = self.simulator.scheduler_statistics()
+            devices = []
+            for name, device in topology.devices.items():
+                position = self.document.get("positions", {}).get(name, {"x": 200, "y": 200})
+                devices.append({
+                    "id": name,
+                    "name": name,
+                    "type": device.device_type,
+                    "x": position["x"],
+                    "y": position["y"],
+                    "status": device.status,
+                    "default_gateway": device.default_gateway,
+                    "interfaces": [i.to_dict() for i in device.interfaces],
+                    "mac_table": dict(device.mac_table) if device.is_switch else {},
+                })
+            links = []
+            for u, v, edge in topology.graph.edges(data=True):
+                links.append({
+                    "id": f"{u}--{v}", "source": u, "target": v,
+                    "status": edge.get("status", "UP"),
+                    "latency": float(edge.get("latency", 0.0)),
+                    "bandwidth": float(edge.get("bandwidth", 0.0)),
+                    "packet_loss": float(edge.get("packet_loss", 0.0)),
+                    "congestion": float(edge.get("congestion", 0.0)),
+                    "duplex": edge.get("duplex", "Full"),
+                    "interface_a": edge.get("interface_a", "eth0"),
+                    "interface_b": edge.get("interface_b", "eth0"),
+                })
+            flows = []
+            for flow in self.simulator.active_flows.values():
+                flows.append({"id": flow.flow_id, "source": flow.source, "destination": flow.destination, "route": flow.current_route, "status": flow.status, "delivered": flow.packets_delivered, "dropped": flow.packets_dropped})
+            routing_tables = {}
+            for device in topology.devices.values():
+                if device.is_router:
+                    routing_tables[device.name] = [entry.to_dict() for entry in self.simulator.routing_table(device.name).entries]
+            return {
+                "name": self.document.get("name", "Untitled Network"),
+                "time": self.simulator.time,
+                "running": self.running,
+                "speed": self.speed,
+                "devices": devices,
+                "links": links,
+                "flows": flows,
+                "last_packet": self.last_packet,
+                "queue": {"length": queue.get("current_queue_length", 0), "max": queue.get("max_queue_length", 0), "average_wait": queue.get("average_waiting_time", 0.0)},
+                "metrics": {"sent": metrics["packets_sent"], "delivered": metrics["packets_delivered"], "dropped": metrics["packets_dropped"], "pdr": metrics["packet_delivery_ratio"], "latency": metrics["average_latency"] * 1000, "throughput": metrics["throughput"], "route_changes": sum(1 for event in self.simulator.event_logger.events if event.event_type == "ROUTE_RECALCULATED")},
+                "events": [event.to_dict() for event in self.simulator.event_logger.get_events(limit=40)],
+                "routing": {"algorithm": self.simulator.get_router_algorithm(), "weights": self.simulator.get_routing_weights()},
+                "qos": {
+                    "scheduler": self.simulator.scheduler_name,
+                    "priorities": self.simulator.get_priority_config(),
+                    "weights": self.simulator.get_wfq_weights(),
+                },
+                "routing_tables": routing_tables,
+                "can_undo": bool(self.history),
+                "can_redo": bool(self.future),
+            }
+
+
+def _device(kind: str, name: str, x: float, y: float) -> Dict[str, Any]:
+    return {"id": name, "type": kind, "x": x, "y": y, "interfaces": []}
+
+
+def _link(source: str, target: str, latency: float = 5.0, bandwidth: float = 100.0) -> Dict[str, Any]:
+    return {"id": f"{source}--{target}", "source": source, "target": target, "status": "UP", "latency": latency, "bandwidth": bandwidth, "packet_loss": 0.0, "congestion": 0.0, "duplex": "Full", "interface_a": "eth0", "interface_b": "eth0"}
+
+
+PRESETS: Dict[str, Dict[str, Any]] = {
+    "self_healing": {"version": 1, "name": "Self-Healing Demo", "settings": {"seed": 42, "scheduler": "priority", "routing_algorithm": "dijkstra"}, "devices": [_device("host", "PC1", 100, 220), _device("switch", "SW1", 270, 220), _device("router", "R1", 450, 160), _device("router", "R2", 650, 160), _device("router", "R3", 550, 350), _device("switch", "SW2", 820, 220), _device("host", "PC2", 980, 220), _device("server", "Server1", 650, 430)], "links": [_link("PC1", "SW1"), _link("SW1", "R1"), _link("R1", "R2", 12), _link("R1", "R3", 15), _link("R3", "R2", 15), _link("R2", "SW2"), _link("SW2", "PC2"), _link("R3", "Server1")]},
+    "simple_lan": {"version": 1, "name": "Simple LAN", "settings": {"seed": 42}, "devices": [_device("host", "PC1", 150, 200), _device("switch", "SW1", 450, 200), _device("server", "Server1", 750, 200)], "links": [_link("PC1", "SW1"), _link("SW1", "Server1")]},
+    "two_router": {"version": 1, "name": "Two Router Network", "settings": {"seed": 42}, "devices": [_device("host", "PC1", 100, 200), _device("router", "R1", 300, 200), _device("router", "R2", 600, 200), _device("host", "PC2", 850, 200)], "links": [_link("PC1", "R1"), _link("R1", "R2", 12), _link("R2", "PC2")]},
+    "redundant": {"version": 1, "name": "Redundant Network", "settings": {"seed": 42}, "devices": [_device("host", "PC1", 100, 250), _device("router", "R1", 300, 150), _device("router", "R2", 600, 150), _device("router", "R3", 450, 380), _device("host", "PC2", 800, 250)], "links": [_link("PC1", "R1"), _link("R1", "R2"), _link("R1", "R3"), _link("R3", "R2"), _link("R2", "PC2")]},
+    "qos_demo": {"version": 1, "name": "QoS Demo", "settings": {"seed": 42, "scheduler": "wfq"}, "devices": [_device("host", "PC1", 120, 200), _device("router", "R1", 360, 200), _device("switch", "SW1", 620, 200), _device("server", "Server1", 850, 200)], "links": [_link("PC1", "R1"), _link("R1", "SW1", 10, 25), _link("SW1", "Server1")]},
+    "large_network": {"version": 1, "name": "Large Network", "settings": {"seed": 42}, "devices": [_device("host", f"PC{i}", 80 + (i % 4) * 180, 100 + (i // 4) * 150) for i in range(1, 9)] + [_device("router", f"R{i}", 350 + (i % 3) * 180, 120 + (i // 3) * 180) for i in range(1, 5)] + [_device("switch", "SW1", 550, 300)] + [_device("server", "Server1", 900, 300)], "links": [_link("PC1", "R1"), _link("PC2", "R1"), _link("PC3", "R2"), _link("PC4", "R2"), _link("PC5", "R3"), _link("PC6", "R3"), _link("PC7", "R4"), _link("PC8", "R4"), _link("R1", "SW1"), _link("R2", "SW1"), _link("R3", "SW1"), _link("R4", "SW1"), _link("SW1", "Server1")]},
+    "existing_default": {"version": 1, "name": "Existing Default Topology", "settings": {"seed": 42}, "devices": [_device("host", n, 80 + (i % 4) * 210, 100 + (i // 4) * 180) for i, n in enumerate(["H1", "H2", "H3", "H4"])] + [_device("router", n, 260 + (i % 3) * 190, 110 + (i // 3) * 190) for i, n in enumerate(["R1", "R2", "R3", "R4", "R5", "R6"])], "links": [_link("H1", "R1"), _link("H2", "R2"), _link("H3", "R5"), _link("H4", "R6"), _link("R1", "R2", 10), _link("R1", "R3", 15), _link("R2", "R4", 12), _link("R3", "R4", 8), _link("R3", "R5", 15), _link("R4", "R5", 10), _link("R4", "R6", 18), _link("R5", "R6", 10)]},
+}

@@ -16,13 +16,21 @@ from typing import Any, Dict, Iterable, List, Optional
 from addressing import IPv4Address, parse_interface, subnet_details, validate_ipv4, validate_prefix
 
 
-DEVICE_TYPES = ("host", "pc", "router", "switch", "server")
+DEVICE_TYPES = (
+    "host", "pc", "laptop", "server", "printer", "router", "switch", "hub",
+    "access_point", "cloud", "internet",
+)
 _INTERFACE_COUNTER = 0
 
 
 def _normalise_device_type(device_type: str) -> str:
     value = str(device_type).lower().strip()
-    aliases = {"pc": "host", "computer": "host", "server": "server", "switch": "switch"}
+    aliases = {
+        "pc": "host", "computer": "host", "laptop": "laptop", "server": "server",
+        "printer": "printer", "switch": "switch", "router": "router", "hub": "hub",
+        "access_point": "access_point", "access point": "access_point", "ap": "access_point",
+        "cloud": "cloud", "internet": "internet", "external": "internet",
+    }
     value = aliases.get(value, value)
     if value not in DEVICE_TYPES:
         raise ValueError(f"Unknown device type: {device_type}")
@@ -45,7 +53,7 @@ def default_address(device_name: str, device_type: str = "host") -> tuple[str, i
     match = re.fullmatch(r"([A-Za-z]+)(\d+)", str(device_name))
     index = int(match.group(2)) if match else (sum(map(ord, str(device_name))) % 200) + 1
     kind = _normalise_device_type(device_type)
-    if kind in {"host", "pc"}:
+    if kind in {"host", "pc", "laptop", "printer"}:
         return f"192.168.1.{max(1, index)}", 24
     if kind == "router":
         return f"10.0.0.{max(1, index)}", 30

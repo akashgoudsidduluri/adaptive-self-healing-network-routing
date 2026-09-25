@@ -247,6 +247,13 @@ class NetworkTopology:
                     links.append((left, right))
         return list(dict.fromkeys(links))
 
+    def clear(self) -> None:
+        """Remove all graph nodes/links and device objects for an editable lab."""
+
+        self.graph.clear()
+        self.devices.clear()
+        self._original_bandwidth.clear()
+
     def reset(self) -> None:
         for _, data in self.graph.nodes(data=True):
             data["status"] = "UP"

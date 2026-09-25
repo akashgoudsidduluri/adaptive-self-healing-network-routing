@@ -2,9 +2,9 @@
 
 > An interactive Computer Networks simulation system that dynamically selects routes based on network conditions, detects failures, reroutes traffic automatically, applies QoS scheduling, and analyzes network performance.
 
-![Status](https://img.shields.io/badge/Stage-6%20Complete-brightgreen)
+![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-98%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-132%20Passed-success)
 
 ## Overview
 
@@ -36,11 +36,51 @@ Traditional shortest-path routing may continue using a route even when its curre
 
 This is a **simulation-based Computer Networks educational project**, not production router software.
 
-## Interactive Network Workspace
+## Primary Network Laboratory — Editable Topology Workbench
 
-The default application view is now a live network laboratory rather than an analytics dashboard.
-A custom SVG workspace renders the existing 10-device topology with router and PC symbols, status
-LEDs, cable labels, congestion colours, failed links and the engine-selected active route.
+The primary NetAdapt experience is now a real editable network laboratory, not a fixed
+analytics dashboard. Start it with:
+
+```bash
+python lab_server.py --port 8765
+```
+
+Open `http://localhost:8765`. The browser is a responsive topology editor; the
+Python `LabSession` is the single source of truth for devices, links, traffic,
+faults, routes, queues, protocol events, and metrics.
+
+- **Build:** drag PC, Laptop, Server, Printer, Router, Switch, Hub, Access Point,
+  Cloud, or Internet devices onto the canvas.
+- **Edit:** move, rename, duplicate, delete, connect, disconnect, and configure
+  devices and links. Positions snap to a grid and persist in the topology JSON.
+- **Connect:** use Connect mode to create real `NetworkTopology` links with
+  latency, bandwidth, packet loss, congestion, duplex, and interface metadata.
+- **Configure:** edit IPv4/prefix, MAC, interface status, link conditions, routing
+  algorithm and weights, plus FIFO/Priority/WFQ scheduler and per-class settings
+  through the contextual inspector.
+- **Simulate:** start real traffic, play/pause/step/reset, change speed, and see
+  packets animate along the route returned by the Python simulator.
+- **Break and heal:** fail/recover links and devices, increase congestion/loss,
+  reduce bandwidth, and observe heartbeat detection, route recalculation,
+  rerouting, and recovery in the bottom event timeline.
+- **Inspect:** click packets, devices, cables, events, routers, switches, or use
+  the real device console (`show interfaces`, `show ip route`, `show arp`,
+  `ipconfig`, `ping`, and `tracert`).
+- **Persist and edit history:** save/load JSON topology documents and use undo/redo
+  for device, link, position, and configuration edits.
+- **Scale:** the SVG canvas is designed for 50+ devices and 100+ links without
+  using a frontend-only topology model.
+
+The default document is **Self-Healing Demo**, but `New` creates a blank topology.
+The legacy H1/R1 topology is available only as the `Existing Default Topology`
+preset. QoS, Routing, Combined, and Scenario Labs remain available as secondary
+Streamlit analysis surfaces in `app.py`.
+
+## Secondary Streamlit Workspace
+
+The existing Streamlit application remains available for regression and secondary
+analysis. Its custom SVG workspace renders engine-backed packet traces and controls;
+it is no longer the primary topology editor.
 
 - **Real packet animation:** `STEP`, `PLAY` and `RUN ALL` call
   `NetworkSimulator.process_next_packet()`. The SVG animates the returned packet along its actual
@@ -83,6 +123,10 @@ Scenario Framework (scenarios.py: presets, phased runs, resilience, multi-run,
    ↓
 Interactive SVG Workspace (real packet/event state + inspectors)
    ↓
+Editable Lab Session API (lab_session.py + lab_server.py)
+   ↓
+Primary topology workbench (lab_frontend/)
+   ↓
 Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · Scenario)
 ```
 
@@ -98,7 +142,10 @@ Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · S
 - `metrics.py` — Packet tracking, latency, throughput, PDR, loss, congestion, recovery time, time-series history, before/during/after comparison
 - `events.py` — Structured event system (TRAFFIC_STARTED, LINK_FAILED, FAILURE_DETECTED, ROUTE_RECALCULATED, TRAFFIC_REROUTED, etc.)
 - `simulator.py` — Central engine: heartbeat monitoring, failure detection with measurable delay, automatic rerouting, active traffic flows, congestion/loss/bandwidth effects, simulation clock
-- `app.py` — Streamlit shell: primary network workspace plus all existing analysis/experiment labs
+- `lab_session.py` — Editable lab session: topology CRUD, presets, traffic, faults, undo/redo, JSON import/export, diagnostics, and real simulator step state
+- `lab_server.py` — Dependency-free HTTP API/static server for the primary network laboratory
+- `lab_frontend/` — Interactive SVG topology workbench: palette, drag/drop, connections, contextual inspectors, packet animation, queue, timeline, and console
+- `app.py` — Streamlit shell: secondary network workspace plus all existing analysis/experiment labs
 - `network_workspace.py` — Engine-backed SVG workspace, real packet trace stepping, inspectors, controls and secondary panels
 - `scenario_lab.py` — Stage 6 "Scenario Lab" tab (rendered by `app.py`)
 - `test_simulation.py` — Stage 1 tests
@@ -106,6 +153,7 @@ Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · S
 - `test_stage4_5.py` — Stage 4+5 tests (routing algorithms, weights, schedulers, per-class metrics, queue statistics, deterministic experiments)
 - `test_stage6.py` — Stage 6 tests (scenario presets, application/reset, phased runs, resilience, route history, reproducibility, multi-run, sensitivity, comparison, export)
 - `test_workspace.py` — Live workspace regression tests (real packet routes/events, drops, heartbeat rerouting, topology state, SVG motion payload)
+- `test_lab.py` — Editable topology/session integration tests (CRUD, links, interfaces, faults, serialization, undo/redo, console, scale)
 
 ---
 
@@ -547,19 +595,27 @@ Dependencies:
 
 ## Run Application
 
+Primary editable network laboratory:
+
+```bash
+python lab_server.py --port 8765
+```
+
+Open `http://localhost:8765`.
+
+Secondary Streamlit analytics and experiment labs:
+
 ```bash
 streamlit run app.py
 ```
 
-Open browser at displayed URL (typically http://localhost:8501).
-
 ## Run Tests
 
 ```bash
-pytest -v
+.venv/bin/python -m pytest -q
 ```
 
-Expected: 98 tests passed (14 Stage 1 + 22 Stage 2+3 + 23 Stage 4+5 + 34 Stage 6 + 5 interactive workspace).
+Expected: all existing engine, scenario, workspace, Stage 7, and editable-lab tests pass.
 
 ```bash
 pytest test_stage6.py -v      # Stage 6 only
@@ -714,14 +770,21 @@ Device/interface failure integration is available through
 through the existing heartbeat/self-healing path, so adaptive routing and
 rerouting continue to work with the new infrastructure model.
 
-Stage 7 adds 20 focused tests in `test_stage7.py`. The complete repository
-suite is 118 passing tests: the existing engine, Stage 6 scenario framework,
-workspace regression tests, and Stage 7 protocol tests.
+Stage 7 adds 20 focused tests in `test_stage7.py`. The editable laboratory adds
+14 integration tests in `test_lab.py`. The complete repository suite is 132
+passing tests: the existing engine, Stage 6 scenario framework, workspace
+regression tests, Stage 7 protocol tests, and live topology-editor backend tests.
 
 
 ```
 adaptive-self-healing-network-routing/
-├── app.py                 # Streamlit shell (workspace + preserved labs)
+├── app.py                 # Secondary Streamlit analysis and experiment labs
+├── lab_server.py          # Primary editable lab HTTP server
+├── lab_session.py         # Backend source of truth for editable lab operations
+├── lab_frontend/
+│   ├── index.html         # Primary network-laboratory shell
+│   ├── styles.css         # Dark professional engineering-lab UI
+│   └── app.js             # Canvas interactions, API sync, animation, inspectors
 ├── network_workspace.py   # Interactive SVG workspace and real packet-step controller
 ├── scenario_lab.py        # Stage 6 Scenario Lab tab
 ├── topology.py            # Network topology with positions
@@ -741,6 +804,7 @@ adaptive-self-healing-network-routing/
 ├── test_stage6.py         # Stage 6 tests
 ├── test_stage7.py         # Stage 7 infrastructure/protocol tests
 ├── test_workspace.py      # Interactive workspace regression tests
+├── test_lab.py            # Editable lab backend integration tests
 ├── requirements.txt       # Dependencies
 └── README.md
 ```
@@ -797,7 +861,7 @@ adaptive-self-healing-network-routing/
 - [x] Scenario comparison on identical workload and seed
 - [x] Reproducibility with deterministic seeds (dedicated tests)
 - [x] CSV / DataFrame export of every result
-- [x] 34 new Stage 6 tests, all 59 Stage 1-5 tests still passing (93 total)
+- [x] 34 new Stage 6 tests; all prior tests preserved and passing
 - [x] Scenario Lab tab in the dashboard (additive only, existing tabs unchanged)
 - [x] No fake or hardcoded experiment metrics
 - [x] README documents Stage 6
