@@ -1,6 +1,0 @@
-networkx>=3.2
-numpy>=1.26
-pandas>=2.0
-streamlit>=1.35
-plotly>=5.20
-pytest>=8.0
