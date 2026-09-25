@@ -32,18 +32,20 @@ python -m venv .venv
 | `.venv/bin/streamlit run app.py` | Secondary analytics workspace: QoS Lab, Routing Lab, Combined Lab, Scenario Lab | http://localhost:8501 |
 | `.venv/bin/python -m pytest -q` | Full test suite (309 tests, ~6 s) | — |
 
-**Why the preview link shows `https://` but the app is `http://localhost:8765/`.** They are the
-same application. `lab_server.py` speaks plain HTTP on port 8765 inside the workspace
-(`http://localhost:8765/` is the address to use locally). The hosted preview you open in the browser
-is reached through a managed TLS-terminating proxy on the Freebuff side: it accepts `https://` from
-the browser, decrypts it, and forwards the request over `http://` to `localhost:8765`. So:
+**The lab is served over plain HTTP — there is no HTTPS anywhere in this project.**
+`lab_server.py` is a standard-library `ThreadingHTTPServer` bound to `0.0.0.0:8765`, so the browser
+address is always:
 
-- `https://<preview-host>/` = your browser → encrypted → Freebuff proxy → `http://localhost:8765/`
-- `http://localhost:8765/` = direct, unencrypted, local access to the same server process.
+```
+http://localhost:8765/
+```
 
-The lab itself is not served over TLS, and it does not need to be: there is no account, no
-cookie/session state, and no secret in the request path. The proxy simply makes the preview safe to
-expose to a browser outside the machine.
+The hosted preview link points at that same HTTP server. `https://` prefixes you may see elsewhere
+(badge images in this README, for example) belong to external services such as shields.io, not to the
+NetAdapt application. Nothing in the app requires TLS: there is no login, no cookie or session
+state, and no secret travelling in the request path, so a certificate would add no security here. If
+you ever expose the lab beyond your own machine, terminate TLS in a reverse proxy in front of port
+8765 rather than modifying the server.
 
 ---
 
