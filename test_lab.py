@@ -181,3 +181,21 @@ def test_editing_large_topology_remains_structurally_responsive():
     state = session.state()
     assert len(state["devices"]) == 50
     assert len(state["routing_tables"]) == 25
+
+
+def test_reset_clears_diagnostic_packet_state():
+    session = LabSession()
+    session.run_ping("PC1", "Server1", count=2)
+    assert session.state()["packets"]
+    measured = session.state()["metrics"]
+    assert measured["sent"] == 2
+    assert measured["delivered"] == 2
+    assert measured["pdr"] == 100.0
+    reset = session.reset_simulation()
+    assert reset["packets"] == []
+    assert reset["last_packet"] is None
+    assert reset["diagnostic_result"] is None
+    assert reset["metrics"]["sent"] == 0
+    assert reset["metrics"]["delivered"] == 0
+    assert reset["metrics"]["dropped"] == 0
+    assert reset["events"][-1]["event"] == "SIMULATION_RESET"

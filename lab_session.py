@@ -560,6 +560,10 @@ class LabSession:
             self.simulator.reset()
             self.running = False
             self.last_packet = None
+            self.diagnostic_result = None
+            self.transport_result = None
+            self.service_result = None
+            self.security_result = None
             return self.state()
 
     def set_running(self, running: bool) -> Dict[str, Any]:
@@ -616,10 +620,31 @@ class LabSession:
     def _set_diagnostic_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         self.diagnostic_result = deepcopy(result)
         packet_results = result.get("packet_results") or result.get("packets") or []
+        self.record_diagnostic_packets(result)
         if packet_results:
             self.last_packet = deepcopy(packet_results[-1])
         self.running = False
         return self.state()
+
+    def record_diagnostic_packets(self, result: Dict[str, Any]) -> None:
+        """Record measured diagnostic packets in the same metrics as flow traffic."""
+        if result.get("type") != "ping":
+            return
+        rtt_ms = result.get("rtt_ms", {}).get("average")
+        for packet in result.get("packet_results") or []:
+            delivered = packet.get("status") == "DELIVERED" or packet.get("delivered") is True
+            latency = (float(rtt_ms) / 1000.0) if delivered and rtt_ms is not None else None
+            self.simulator.metrics.record(
+                packet.get("id", len(self.simulator.metrics.records)),
+                float(packet.get("created_at", self.simulator.time)),
+                float(packet.get("created_at", self.simulator.time)) + latency if latency is not None else None,
+                latency,
+                int(packet.get("size", 84)),
+                "DELIVERED" if delivered else "DROPPED",
+                flow_id=packet.get("flow_id"),
+                route=packet.get("route"),
+                traffic_type="ICMP",
+            )
 
     def run_ping(self, source: str, destination: str, count: int = 4) -> Dict[str, Any]:
         with self.lock:

@@ -72,6 +72,7 @@ def _summary(steps: List[str], explanation: str, extra: Optional[Dict[str, Any]]
 
 def _basic_ping(session: Any) -> Dict[str, Any]:
     result = session.simulator.diagnostic_ping("PC1", "Server1", count=4)
+    session.record_diagnostic_packets(result)
     return _summary(
         [
             f"PC1 sent {result['sent']} ICMP echo request(s) to Server1",
