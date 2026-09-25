@@ -136,11 +136,16 @@ class Packet:
     #: Drawing it at creation time keeps the loss realisation identical across
     #: schedulers and routing algorithms, which makes comparison fair.
     loss_roll: float | None = None
+    #: IPv4 TTL used by the Stage 7 forwarding/ICMP model.
+    ttl: int = 64
 
     def __post_init__(self) -> None:
         if self.traffic_type not in PRIORITIES:
             raise ValueError(f"Unknown traffic type: {self.traffic_type}")
         self.priority = float(PRIORITIES[self.traffic_type])
+        if int(self.ttl) < 1:
+            raise ValueError("Packet TTL must be at least 1")
+        self.ttl = int(self.ttl)
 
 
 # --------------------------------------------------------------------------

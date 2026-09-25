@@ -635,7 +635,89 @@ All steps use real simulation engine, no hardcoded routes or fake metrics.
 - [x] Stage 1-3 tests still pass (36) and 23 Stage 4+5 tests added (59 total)
 - [x] README documents Stage 4 + 5
 
-## Project Structure
+## Stage 7 — Network Infrastructure, ARP, and ICMP
+
+Stage 7 adds an educational network-infrastructure layer without replacing the
+existing graph, simulator, routing, QoS, event, metrics, or Scenario Lab code.
+
+### Devices and interfaces
+
+- `devices.py` provides `Device`, `NetworkInterface` (also exported as
+  `Interface`), `Switch`, and `RoutingTable`.
+- Existing `H*` nodes remain hosts and `R*` nodes remain routers. Custom
+  `pc`, `switch`, and `server` nodes can be added to `NetworkTopology` with
+  `add_node(name, type)` and then connected with `add_link`.
+- Every default node receives deterministic MAC and IPv4 interface metadata.
+  Interfaces expose their link associations and `UP`/`DOWN` state.
+- The graph remains the source of truth for routing and failure injection;
+  device/interface status is synchronized with the graph.
+
+### IPv4 and subnet validation
+
+`addressing.py` supplies `IPv4Address`, `validate_ipv4`, `validate_prefix`,
+and `subnet_details`. The model supports an address, prefix, subnet mask,
+network address, broadcast address, and membership checks. Hosts expose a
+default gateway name for the educational access-router relationship. This is
+not a production IP stack.
+
+### Routing tables and forwarding
+
+Router routing tables are derived from the live adaptive route for each
+reachable destination. Entries contain a destination network, prefix, next
+hop, outgoing interface, and metric. `AdaptiveRouter` Dijkstra and
+Bellman-Ford selection remain unchanged. `ProtocolStack.forward_packet()`
+and `NetworkSimulator.forward_packet()` perform hop-by-hop forwarding,
+record `ROUTE_LOOKUP` and `PACKET_FORWARDED`, decrement TTL at routers, and
+return structured forwarding state.
+
+### ARP
+
+The protocol stack implements a deterministic, per-device ARP cache with
+request, reply, miss, insertion, lookup, and timestamp-based expiration. Ping
+requests resolve the next-hop address on each live route hop. ARP activity is
+recorded through the existing `EventLogger` as `ARP_REQUEST`, `ARP_REPLY`,
+`ARP_CACHE_UPDATE`, and `ARP_MISS`.
+
+### ICMP and ping
+
+`NetworkSimulator.ping(source, destination, ttl=64)` performs a real route
+lookup, hop-by-hop ARP resolution, ICMP Echo Request forwarding, and Echo
+Reply generation. The structured result includes success, RTT, hop count,
+route, TTL, ARP resolutions, packet-loss probability, and failure reason.
+Unavailable routes, failed links, and exhausted TTLs generate
+`DESTINATION_UNREACHABLE` or `ICMP_TTL_EXCEEDED` events.
+
+### Layer-2 switching
+
+Switch devices maintain a MAC table. `switch_frame()` learns source MACs,
+forwards known destinations, and floods broadcast or unknown destinations
+through non-ingress interfaces. The behavior emits `MAC_LEARNED` and
+`MAC_FLOOD` events and is intentionally a small educational model rather than
+an enterprise switch implementation.
+
+### Stage 7 diagnostic API
+
+```python
+from simulator import NetworkSimulator
+from protocols import ProtocolPacket, SwitchFrame
+
+sim = NetworkSimulator(seed=42)
+device = sim.get_device("H1")
+entry = sim.arp_lookup("H1", sim.get_device("R1").interfaces[0].ip_address)
+route_entry = sim.routing_table_lookup("R1", "192.168.1.3")
+ping = sim.ping("H1", "H3")
+forwarded = sim.forward_packet(ProtocolPacket("H1", "H3", ttl=64))
+```
+
+Device/interface failure integration is available through
+`fail_interface()` / `recover_interface()`. The methods fail associated links
+through the existing heartbeat/self-healing path, so adaptive routing and
+rerouting continue to work with the new infrastructure model.
+
+Stage 7 adds 20 focused tests in `test_stage7.py`. The complete repository
+suite is 118 passing tests: the existing engine, Stage 6 scenario framework,
+workspace regression tests, and Stage 7 protocol tests.
+
 
 ```
 adaptive-self-healing-network-routing/
@@ -649,11 +731,15 @@ adaptive-self-healing-network-routing/
 ├── events.py              # Structured event system
 ├── simulator.py           # Central simulator with self-healing (enhanced)
 ├── experiments.py         # Stage 4 + 5 experiment engine
-├── scenarios.py           # Stage 6 scenario framework + resilience/sensitivity (new)
+├── scenarios.py           # Stage 6 scenario framework + resilience/sensitivity
+├── addressing.py          # Stage 7 IPv4 validation and subnet helpers
+├── devices.py             # Stage 7 devices, interfaces, switches, routing tables
+├── protocols.py           # Stage 7 ARP, ICMP, forwarding, MAC switching
 ├── test_simulation.py     # Stage 1 tests
 ├── test_stage2.py         # Stage 2+3 tests
 ├── test_stage4_5.py       # Stage 4+5 tests
 ├── test_stage6.py         # Stage 6 tests
+├── test_stage7.py         # Stage 7 infrastructure/protocol tests
 ├── test_workspace.py      # Interactive workspace regression tests
 ├── requirements.txt       # Dependencies
 └── README.md

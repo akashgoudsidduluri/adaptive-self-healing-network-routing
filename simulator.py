@@ -22,6 +22,7 @@ from qos import (
 )
 from metrics import Metrics, RecoveryRecord
 from events import EventLogger, EventType
+from protocols import ProtocolPacket, ProtocolStack, SwitchFrame
 
 
 @dataclass
@@ -110,6 +111,9 @@ class NetworkSimulator:
 
         # Enhanced event system
         self.event_logger = EventLogger()
+        # Stage 7 protocol services share the live topology, clock, and events.
+        self.protocols = ProtocolStack(self)
+        self.arp = self.protocols.arp
 
         # Heartbeat / health check simulation
         self.heartbeat_interval = heartbeat_interval
@@ -206,6 +210,7 @@ class NetworkSimulator:
         size: int = 1000,
         flow_id: Optional[str] = None,
         creation_time: Optional[float] = None,
+        ttl: int = 64,
     ) -> Packet:
         if source == destination:
             raise ValueError("Source and destination must differ.")
@@ -228,6 +233,7 @@ class NetworkSimulator:
             traffic_type=traffic_type,
             size=size,
             creation_time=ctime,
+            ttl=ttl,
         )
 
         # Draw the loss decision at creation so that every configuration being
@@ -1039,6 +1045,22 @@ class NetworkSimulator:
         if self.failure_detection_timeout <= 0:
             self.check_heartbeats()
 
+    def fail_interface(self, node: str, interface_id: str) -> list[tuple[str, str]]:
+        """Fail an interface and its associated links through normal simulation paths."""
+
+        links = self.topology.fail_interface(node, interface_id)
+        for u, v in links:
+            self.fail_link(u, v)
+        return links
+
+    def recover_interface(self, node: str, interface_id: str) -> list[tuple[str, str]]:
+        """Recover an interface and associated links through normal simulation paths."""
+
+        links = self.topology.recover_interface(node, interface_id)
+        for u, v in links:
+            self.recover_link(u, v)
+        return links
+
     def recover_node(self, node: str) -> None:
         if node not in self.topology.graph:
             raise ValueError(f"Node {node} does not exist.")
@@ -1358,6 +1380,36 @@ class NetworkSimulator:
     def get_structured_events(self, limit: int = 50):
         return self.event_logger.get_events(limit)
 
+    # ------------------------------------------------------------------
+    # Stage 7 protocol diagnostics
+    # ------------------------------------------------------------------
+    def ping(self, source: str, destination: str, ttl: int = 64):
+        return self.protocols.ping(source, destination, ttl=ttl)
+
+    def arp_lookup(self, source: str, ip_address: str):
+        return self.protocols.arp_lookup(source, ip_address)
+
+    def routing_table(self, router_name: str):
+        return self.protocols.routing_table(router_name)
+
+    def routing_table_lookup(self, router_name: str, destination_ip: str):
+        return self.protocols.routing_table_lookup(router_name, destination_ip)
+
+    def mac_table_lookup(self, switch_name: str, mac_address: str):
+        return self.protocols.mac_table_lookup(switch_name, mac_address)
+
+    def switch_frame(self, switch_name: str, frame: SwitchFrame, available_interfaces=None):
+        return self.protocols.switch_frame(switch_name, frame, available_interfaces)
+
+    def route_inspection(self, source: str, destination: str):
+        return self.protocols.route_inspection(source, destination)
+
+    def forward_packet(self, packet: ProtocolPacket, route: list[str] | None = None, ttl: int | None = None):
+        return self.protocols.forward_packet(packet, route=route, ttl=ttl)
+
+    def get_device(self, node: str):
+        return self.topology.get_device(node)
+
     def reset(self) -> None:
         self.topology.reset()
         self.metrics.reset()
@@ -1367,6 +1419,9 @@ class NetworkSimulator:
         self.packets.clear()
         self.events.clear()
         self.event_logger.clear()
+        self.protocols.arp.clear()
+        self.protocols.routing_tables.clear()
+        self.protocols.switch_tables.clear()
 
         self._failed_links.clear()
         self._failed_nodes.clear()

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 import networkx as nx
 
+from devices import Device, NetworkInterface, default_address, deterministic_mac
+
 
 @dataclass
 class Link:
@@ -32,6 +34,9 @@ DEFAULT_POSITIONS: Dict[str, Tuple[float, float]] = {
 class NetworkTopology:
     def __init__(self) -> None:
         self.graph = nx.Graph()
+        # Stage 7 device/interface model.  The graph remains authoritative for
+        # links and routing so all pre-existing topology tests stay compatible.
+        self.devices: Dict[str, Device] = {}
         self._build_default_topology()
         # Store original bandwidth for reset and bandwidth reduction tracking
         self._original_bandwidth: Dict[Tuple[str, str], float] = {}
@@ -76,10 +81,20 @@ class NetworkTopology:
             type=node_type,
             status="UP",
         )
+        if node not in self.devices:
+            address, prefix = default_address(node, node_type)
+            gateway = {"H1": "R1", "H2": "R2", "H3": "R5", "H4": "R6"}.get(node)
+            self.devices[node] = Device(
+                node,
+                node_type,
+                [NetworkInterface("eth0", mac_address=deterministic_mac(f"{node}-eth0"), ip_address=address, prefix=prefix)],
+                default_gateway=gateway if node_type in {"host", "pc"} else None,
+            )
 
     def remove_node(self, node: str) -> None:
         if node in self.graph:
             self.graph.remove_node(node)
+        self.devices.pop(node, None)
 
     def add_link(
         self,
@@ -104,6 +119,13 @@ class NetworkTopology:
         if not hasattr(self, '_original_bandwidth'):
             self._original_bandwidth = {}
         self._original_bandwidth[key] = float(bandwidth)
+        if hasattr(self, "devices"):
+            for endpoint, neighbour in ((u, v), (v, u)):
+                device = self.devices.get(endpoint)
+                if device is not None:
+                    for interface in device.interfaces:
+                        interface.associate_link(key[0] + "-" + key[1])
+                        interface.associate_link(f"{endpoint}-{neighbour}")
 
     def remove_link(self, u: str, v: str) -> None:
         if self.graph.has_edge(u, v):
@@ -112,10 +134,14 @@ class NetworkTopology:
     def fail_node(self, node: str) -> None:
         if node in self.graph:
             self.graph.nodes[node]["status"] = "DOWN"
+            if node in self.devices:
+                self.devices[node].set_status("DOWN")
 
     def recover_node(self, node: str) -> None:
         if node in self.graph:
             self.graph.nodes[node]["status"] = "UP"
+            if node in self.devices:
+                self.devices[node].set_status("UP")
 
     def fail_link(self, u: str, v: str) -> None:
         if self.graph.has_edge(u, v):
@@ -182,9 +208,50 @@ class NetworkTopology:
 
         return g
 
+    def get_device(self, node: str) -> Device | None:
+        """Return the Stage 7 device associated with a topology node."""
+
+        return self.devices.get(node)
+
+    def add_interface(self, node: str, interface: NetworkInterface) -> NetworkInterface:
+        if node not in self.devices:
+            raise ValueError(f"Node {node} does not exist.")
+        return self.devices[node].add_interface(interface)
+
+    def fail_interface(self, node: str, interface_id: str) -> list[Tuple[str, str]]:
+        """Mark an interface down and return the associated links to fail."""
+
+        device = self.get_device(node)
+        if device is None:
+            raise ValueError(f"Node {node} does not exist.")
+        interface = device.get_interface(interface_id)
+        interface.set_status("DOWN")
+        links: list[Tuple[str, str]] = []
+        for association in interface.link_associations:
+            if "-" in association:
+                left, right = association.split("-", 1)
+                if self.graph.has_edge(left, right):
+                    links.append((left, right))
+        return list(dict.fromkeys(links))
+
+    def recover_interface(self, node: str, interface_id: str) -> list[Tuple[str, str]]:
+        device = self.get_device(node)
+        if device is None:
+            raise ValueError(f"Node {node} does not exist.")
+        device.get_interface(interface_id).set_status("UP")
+        links: list[Tuple[str, str]] = []
+        for association in device.get_interface(interface_id).link_associations:
+            if "-" in association:
+                left, right = association.split("-", 1)
+                if self.graph.has_edge(left, right):
+                    links.append((left, right))
+        return list(dict.fromkeys(links))
+
     def reset(self) -> None:
         for _, data in self.graph.nodes(data=True):
             data["status"] = "UP"
+        for device in self.devices.values():
+            device.set_status("UP")
 
         for u, v, data in self.graph.edges(data=True):
             data["status"] = "UP"
@@ -233,3 +300,7 @@ class NetworkTopology:
 
     def link_uses_node(self, link: Tuple[str, str], node: str) -> bool:
         return node in link
+
+    def device(self, node: str) -> Device | None:
+        """Alias for get_device used by diagnostics."""
+        return self.get_device(node)
