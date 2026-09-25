@@ -202,6 +202,7 @@ class TCPConnection:
     retransmission_count: int = 0
     data_packets_sent: int = 0
     data_packets_delivered: int = 0
+    response_packets_sent: int = 0
     data_packets_lost: int = 0
     bytes_sent: int = 0
     bytes_transferred: int = 0
@@ -292,6 +293,7 @@ class TCPConnection:
             ),
             "bytes_sent": self.bytes_sent,
             "bytes_transferred": self.bytes_transferred,
+            "response_packets_sent": self.response_packets_sent,
             "average_latency": (
                 sum(data_latencies) / len(data_latencies)
                 if data_latencies
@@ -349,13 +351,14 @@ class TransportLayer:
         if source == destination:
             raise ValueError("Transport source and destination must differ")
 
-    def _enqueue(self, packet: TransportPacket) -> TransportPacket:
+    def _enqueue(self, packet: TransportPacket, creation_time: Optional[float] = None) -> TransportPacket:
         network_packet = self.simulator.generate_packet(
             packet.source,
             packet.destination,
             packet.traffic_class,
             max(1, packet.payload_size),
             packet.flow_id,
+            creation_time=creation_time,
         )
         packet.packet_id = self._packet
         self._packet += 1
@@ -523,6 +526,50 @@ class TransportLayer:
             )
         return sent
 
+    def enqueue_raw(
+        self,
+        protocol: str,
+        source: str,
+        destination: str,
+        source_port: int,
+        destination_port: int,
+        payload_size: int = 512,
+        *,
+        flags: Optional[List[str]] = None,
+        kind: str = "DATA",
+        traffic_class: str = "HTTP",
+        flow_id: Optional[str] = None,
+        sequence_number: Optional[int] = None,
+        acknowledgement_number: Optional[int] = None,
+        creation_time: Optional[float] = None,
+    ) -> TransportPacket:
+        """Enqueue one service/security transport packet without a flow object.
+
+        This is used by controlled attack scenarios and protocol simulations;
+        it deliberately uses the same network packet path as every other
+        transport packet and therefore does not bypass routing or QoS.
+        """
+        self._validate_endpoints(source, destination)
+        protocol = str(protocol).upper()
+        if protocol not in {"TCP", "UDP"}:
+            raise ValueError("Raw transport protocol must be TCP or UDP")
+        packet = TransportPacket(
+            protocol,
+            source,
+            destination,
+            int(source_port),
+            int(destination_port),
+            max(1, int(payload_size)),
+            flow_id or f"RAW-{protocol}-{self._packet:03d}",
+            sequence_number,
+            acknowledgement_number,
+            list(flags or []),
+            0,
+            kind,
+            traffic_class,
+        )
+        return self._enqueue(packet, creation_time=creation_time)
+
     def _ack(
         self,
         connection: TCPConnection,
@@ -583,6 +630,53 @@ class TransportLayer:
                 payload_size=packet.payload_size,
                 packet_id=packet.packet_id,
             )
+        return sent
+
+    def send_tcp_response(
+        self,
+        flow_id: str,
+        payload_size: int = 512,
+    ) -> TransportPacket:
+        """Send a server -> client data segment on an established connection.
+
+        Stage 10 application services (HTTP, FTP, SMTP) use this so their
+        responses travel back over the same simulated TCP connection, the same
+        scheduler queue, and the same routing/QoS path as the request.
+        """
+        connection = self.connections[flow_id]
+        if connection.state != TCPState.ESTABLISHED:
+            raise ValueError(
+                "TCP connection must be ESTABLISHED before sending a response"
+            )
+        sequence = connection.next_sequence
+        packet = TransportPacket(
+            "TCP",
+            connection.destination,
+            connection.source,
+            connection.destination_port,
+            connection.source_port,
+            max(1, int(payload_size)),
+            connection.flow_id,
+            sequence,
+            connection.cumulative_ack,
+            ["ACK"],
+            connection.receiver_window,
+            "RESPONSE",
+            connection.traffic_class,
+        )
+        connection.packets.append(packet)
+        connection.next_sequence += 1
+        connection.response_packets_sent += 1
+        connection.bytes_sent += packet.payload_size
+        sent = self._enqueue(packet)
+        self._log(
+            EventType.TCP_DATA_SENT,
+            f"TCP response segment sent seq={sequence}",
+            connection,
+            sequence_number=sequence,
+            payload_size=packet.payload_size,
+            packet_id=packet.packet_id,
+        )
         return sent
 
     def set_receiver_window(self, flow_id: str, window_size: int) -> TCPConnection:
@@ -826,7 +920,7 @@ class TransportLayer:
                 connection.elapsed_time,
                 self.simulator.time - connection.started_at,
             )
-            if packet.kind == "DATA":
+            if packet.kind in {"DATA", "RESPONSE"}:
                 if delivered:
                     connection.data_packets_delivered += 1
                     connection.bytes_transferred += packet.payload_size
@@ -976,6 +1070,15 @@ class TransportLayer:
                     connection.setup_completed - connection.started_at
                 )
                 * 1000,
+                packet_id=transport_packet.packet_id,
+            )
+        elif transport_packet.kind == "RESPONSE" and transport_packet.payload_size:
+            self._log(
+                EventType.TCP_DATA_SENT,
+                f"TCP response segment delivered seq={transport_packet.sequence_number}",
+                connection,
+                sequence_number=transport_packet.sequence_number,
+                payload_size=transport_packet.payload_size,
                 packet_id=transport_packet.packet_id,
             )
         elif transport_packet.kind == "DATA" and transport_packet.payload_size:

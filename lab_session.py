@@ -711,6 +711,66 @@ class LabSession:
                 return {"output": "\n".join(f"{index + 1}: {hop}" for index, hop in enumerate(result.route)) or "No route", "command": command, "success": result.success}
             raise LabError(f"Unsupported command: {command}")
 
+    # ------------------------------------------------------------------
+    # Stage 10 services and security controls
+    # ------------------------------------------------------------------
+    def install_service(self, name: str, device: str, **config) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.install_service(name, device, **config)
+            return self.state()
+
+    def service_control(self, name: str, device: str, action: str) -> Dict[str, Any]:
+        with self.lock:
+            if action == "start":
+                self.simulator.start_service(name, device)
+            elif action == "stop":
+                self.simulator.stop_service(name, device)
+            elif action == "restart":
+                self.simulator.restart_service(name, device)
+            else:
+                raise LabError("Service action must be start, stop, or restart")
+            return self.state()
+
+    def service_request(self, name: str, client: str, **values) -> Dict[str, Any]:
+        with self.lock:
+            name = name.upper()
+            if name == "DHCP":
+                result = self.simulator.dhcp_acquire(client, values.get("server"))
+            elif name == "DNS":
+                result = self.simulator.dns_query(client, values["hostname"], values.get("server"))
+            elif name == "HTTP":
+                result = self.simulator.http_request(client, values.get("server"), values.get("method", "GET"), values.get("path", "/"), values.get("body"))
+            elif name == "FTP":
+                result = self.simulator.ftp_command(client, values.get("server"), values.get("command", "LIST"), values.get("filename"), values.get("content"))
+            elif name == "SMTP":
+                result = self.simulator.smtp_send(client, values.get("server"), values.get("sender", "student@netadapt.local"), values.get("recipient", "server@netadapt.local"), values.get("subject", "NetAdapt lab message"), values.get("body", "Simulated message"))
+            else:
+                raise LabError(f"Unknown service: {name}")
+            self.service_result = result
+            return self.state()
+
+    def security_control(self, action: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            if action == "firewall":
+                rule = self.simulator.add_firewall_rule(**values)
+            elif action == "port_filter":
+                rule = self.simulator.add_port_filter(**values)
+            elif action == "acl":
+                acl = self.simulator.create_acl(values["name"], values.get("type", "STANDARD"))
+                if values.get("source_ip") or values.get("action"):
+                    self.simulator.add_acl_entry(values["name"], **{k: v for k, v in values.items() if k not in {"name", "type"}})
+                rule = acl
+            elif action == "attach_acl":
+                rule = self.simulator.attach_acl(values["name"], values["device"], values.get("interface_id", "eth0"))
+            elif action == "arp_spoof":
+                rule = self.simulator.arp_spoof(**values)
+            elif action == "flood":
+                rule = self.simulator.start_flood(**values)
+            else:
+                raise LabError(f"Unknown security action: {action}")
+            self.security_result = rule.to_dict() if hasattr(rule, "to_dict") else rule
+            return self.state()
+
     def undo(self) -> Dict[str, Any]:
         with self.lock:
             if not self.history:

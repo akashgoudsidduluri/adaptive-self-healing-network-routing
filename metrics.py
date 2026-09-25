@@ -111,6 +111,92 @@ class TransportMetrics:
         }
 
 
+class ServiceMetrics:
+    """Per-service counters layered beside the original metrics (Stage 10).
+
+    One registry instance tracks DHCP, DNS, HTTP, FTP, and SMTP activity so the
+    numbers are aggregated from real simulated packet exchanges rather than
+    fabricated by the frontend.
+    """
+
+    #: Services that always report a counter block, even before first use.
+    SERVICES = ("DHCP", "DNS", "HTTP", "FTP", "SMTP")
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.counters: Dict[str, Dict[str, float]] = {
+            name: {} for name in self.SERVICES
+        }
+
+    def increment(self, service: str, key: str, amount: float = 1.0) -> float:
+        name = str(service).upper()
+        bucket = self.counters.setdefault(name, {})
+        bucket[key] = bucket.get(key, 0.0) + float(amount)
+        return bucket[key]
+
+    def record_latency(self, service: str, latency: float) -> None:
+        if latency is None:
+            return
+        self.increment(service, "latency_total", float(latency))
+        self.increment(service, "latency_samples", 1.0)
+
+    def get(self, service: str, key: str, default: float = 0.0) -> float:
+        return self.counters.get(str(service).upper(), {}).get(key, default)
+
+    def calculate(self, service: str) -> Dict[str, float]:
+        name = str(service).upper()
+        bucket = dict(self.counters.get(name, {}))
+        samples = bucket.pop("latency_samples", 0.0)
+        total = bucket.pop("latency_total", 0.0)
+        bucket["latency_samples"] = samples
+        bucket["average_latency"] = (total / samples) if samples else 0.0
+        return bucket
+
+    def to_dict(self) -> Dict[str, Dict[str, float]]:
+        return {name: self.calculate(name) for name in sorted(self.counters)}
+
+
+class SecurityMetrics:
+    """Firewall, ACL, ARP, and flood counters (Stage 10)."""
+
+    KEYS = (
+        "packets_inspected",
+        "packets_allowed",
+        "packets_blocked",
+        "firewall_blocks",
+        "port_blocks",
+        "acl_blocks",
+        "arp_conflicts",
+        "spoof_attempts",
+        "poisoned_entries",
+        "floods_detected",
+        "attack_packets_dropped",
+        "normal_packets",
+        "suspicious_packets",
+    )
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.counters: Dict[str, float] = {key: 0.0 for key in self.KEYS}
+
+    def increment(self, key: str, amount: float = 1.0) -> float:
+        self.counters[key] = self.counters.get(key, 0.0) + float(amount)
+        return self.counters[key]
+
+    def get(self, key: str) -> float:
+        return self.counters.get(key, 0.0)
+
+    def calculate(self) -> Dict[str, float]:
+        return dict(self.counters)
+
+    def to_dict(self) -> Dict[str, float]:
+        return self.calculate()
+
+
 class Metrics:
     def __init__(self) -> None:
         self.records: List[PacketRecord] = []

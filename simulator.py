@@ -24,6 +24,7 @@ from metrics import Metrics, RecoveryRecord, TransportMetrics
 from events import EventLogger, EventType
 from protocols import ProtocolPacket, ProtocolStack, SwitchFrame
 from transport import TransportLayer
+from services_security import ServiceSecurityLayer
 
 
 @dataclass
@@ -116,6 +117,11 @@ class NetworkSimulator:
         self.protocols = ProtocolStack(self)
         self.transport_metrics = TransportMetrics()
         self.transport = TransportLayer(self)
+        # Stage 10 is an additive layer on this same simulator.  Service and
+        # security traffic is still enqueued as ordinary network packets and
+        # therefore uses the existing routing, QoS, loss, and failure paths.
+        self.services = ServiceSecurityLayer(self)
+        self.service_security = self.services
         self.arp = self.protocols.arp
 
         # Heartbeat / health check simulation
@@ -625,6 +631,43 @@ class NetworkSimulator:
             flow.route_status = "HEALTHY"
 
         packet.route = path
+        # Stage 10 policy evaluation happens after the real route lookup and
+        # before transmission/loss.  A denied packet still records a normal
+        # simulator metric, while the actual service/security layer supplies
+        # the authoritative drop reason to the packet inspector.
+        security_decision = self.services.inspect_packet(packet, path)
+        if security_decision is not None:
+            if not security_decision.get("allowed", True):
+                self.services.last_block_reason = security_decision.get("reason") or "FIREWALL_BLOCK"
+        if security_decision is not None and not security_decision.get("allowed", True):
+            packet.delivery_status = "DROPPED"
+            self.metrics.record(
+                packet.packet_id,
+                packet.creation_time,
+                None,
+                None,
+                packet.size,
+                "DROPPED",
+                flow_id=flow.flow_id if flow else None,
+                route=path,
+                traffic_type=packet.traffic_type,
+                queue_wait=packet.queue_wait_time,
+            )
+            if flow:
+                flow.packets_dropped += 1
+            self._log_event(
+                EventType.PACKET_BLOCKED,
+                f"Packet {packet.packet_id} blocked by simulated security policy",
+                flow_id=flow.flow_id if flow else None,
+                packet_id=packet.packet_id,
+                reason=security_decision.get("reason") or "FIREWALL_BLOCK",
+                security=security_decision,
+                route=path,
+            )
+            self.time = max(self.time, packet.creation_time) + 0.001
+            self.transport.on_packet_processed(packet)
+            return packet
+
         # Ensure simulation time respects packet creation time (no negative latency)
         if packet.creation_time > self.time:
             self.time = packet.creation_time
@@ -762,6 +805,7 @@ class NetworkSimulator:
         """Advance simulation time by delta and check heartbeats."""
         self.time += delta
         self.transport.process_transport_tick(self.time)
+        self.services.tick(delta)
         self.check_heartbeats()
         self.metrics.snapshot(self.time, self.average_congestion(), len(self.active_flows))
 
@@ -1429,6 +1473,9 @@ class NetworkSimulator:
     def send_tcp_data(self, *args, **kwargs):
         return self.transport.send_tcp_data(*args, **kwargs)
 
+    def send_tcp_response(self, *args, **kwargs):
+        return self.transport.send_tcp_response(*args, **kwargs)
+
     def send_udp_data(self, *args, **kwargs):
         return self.transport.send_udp_data(*args, **kwargs)
 
@@ -1452,6 +1499,87 @@ class NetworkSimulator:
 
     def get_tcp_packet_info(self, *args, **kwargs):
         return self.transport.get_tcp_packet_info(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Stage 10 simulated network services and security
+    # ------------------------------------------------------------------
+    def install_service(self, name: str, device: str, **config):
+        return self.services.registry.install(name, device, **config)
+
+    def remove_service(self, name: str, device: str):
+        return self.services.registry.remove(name, device)
+
+    def start_service(self, name: str, device: str):
+        return self.services.registry.start(name, device)
+
+    def stop_service(self, name: str, device: str):
+        return self.services.registry.stop(name, device)
+
+    def restart_service(self, name: str, device: str):
+        return self.services.registry.restart(name, device)
+
+    def configure_service(self, name: str, device: str, values=None):
+        return self.services.registry.configure(name, device, values or {})
+
+    def service_status(self, device: str = None):
+        return self.services.service_status(device) if device else self.services.service_status_all()
+
+    def dhcp_acquire(self, *args, **kwargs):
+        return self.services.dhcp_acquire(*args, **kwargs)
+
+    def dhcp_renew(self, *args, **kwargs):
+        return self.services.dhcp_renew(*args, **kwargs)
+
+    def dhcp_release(self, *args, **kwargs):
+        return self.services.dhcp_release(*args, **kwargs)
+
+    def dns_query(self, *args, **kwargs):
+        return self.services.dns_query(*args, **kwargs)
+
+    def dns_add_record(self, *args, **kwargs):
+        return self.services.dns_add_record(*args, **kwargs)
+
+    def http_request(self, *args, **kwargs):
+        result = self.services.http_request(*args, **kwargs)
+        if not result.get("success") and result.get("reason") == "CONNECTION_FAILED":
+            result["reason"] = self.services.last_block_reason or result["reason"]
+        return result
+
+    def ftp_connect(self, *args, **kwargs):
+        return self.services.ftp_connect(*args, **kwargs)
+
+    def ftp_command(self, *args, **kwargs):
+        return self.services.ftp_command(*args, **kwargs)
+
+    def smtp_send(self, *args, **kwargs):
+        return self.services.smtp_send(*args, **kwargs)
+
+    def add_firewall_rule(self, **kwargs):
+        return self.services.add_firewall_rule(**kwargs)
+
+    def add_port_filter(self, *args, **kwargs):
+        return self.services.add_port_filter(*args, **kwargs)
+
+    def create_acl(self, *args, **kwargs):
+        return self.services.create_acl(*args, **kwargs)
+
+    def add_acl_entry(self, *args, **kwargs):
+        return self.services.add_acl_entry(*args, **kwargs)
+
+    def attach_acl(self, *args, **kwargs):
+        return self.services.attach_acl(*args, **kwargs)
+
+    def arp_spoof(self, *args, **kwargs):
+        return self.services.arp_spoof(*args, **kwargs)
+
+    def start_flood(self, *args, **kwargs):
+        return self.services.start_flood(*args, **kwargs)
+
+    def service_state(self):
+        return self.services.service_state()
+
+    def security_state(self):
+        return self.services.security_state()
 
     def routing_table(self, router_name: str):
         return self.protocols.routing_table(router_name)
@@ -1485,6 +1613,7 @@ class NetworkSimulator:
         self.event_logger.clear()
         self.protocols.arp.clear()
         self.transport.reset()
+        self.services.reset()
         self.protocols.routing_tables.clear()
         self.protocols.switch_tables.clear()
         self.protocols.protocol_packets.clear()
