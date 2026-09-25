@@ -227,6 +227,7 @@ def test_stage9_22_udp_metrics():
     assert metrics["packets_sent"] == 3
     assert metrics["packets_delivered"] == 3
     assert metrics["throughput"] > 0
+    assert metrics["average_latency"] > 0
     assert metrics["average_rtt_ms"] is None
 
 
@@ -301,6 +302,7 @@ def test_stage9_30_deterministic_tcp_udp_comparison():
     second = compare_transport(NetworkSimulator(seed=17), "H1", "H3", 4, 1000, seed=17)
     assert first == second
     assert {row["protocol"] for row in first["results"]} == {"TCP", "UDP"}
+    assert all(row["average_latency"] > 0 for row in first["results"])
 
 
 def test_stage9_31_cli_transport_information():

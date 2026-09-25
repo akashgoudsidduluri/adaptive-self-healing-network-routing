@@ -129,6 +129,11 @@ class UDPFlow:
     def to_dict(self) -> Dict[str, Any]:
         sent = len(self.packets)
         duration = max(self.elapsed_time, 0.001)
+        latencies = [
+            packet.latency
+            for packet in self.packets
+            if packet.status == "DELIVERED" and packet.latency is not None
+        ]
         return {
             "protocol": "UDP",
             "flow_id": self.flow_id,
@@ -146,6 +151,9 @@ class UDPFlow:
             "bytes_sent": self.bytes_sent,
             "bytes_transferred": self.bytes_delivered,
             "retransmissions": 0,
+            "average_latency": sum(latencies) / len(latencies) if latencies else 0.0,
+            "minimum_latency": min(latencies) if latencies else 0.0,
+            "maximum_latency": max(latencies) if latencies else 0.0,
             "current_rtt_ms": None,
             "average_rtt_ms": None,
             "min_rtt_ms": None,
@@ -228,6 +236,13 @@ class TCPConnection:
         all_sent = len(self.packets)
         all_delivered = sum(packet.status == "DELIVERED" for packet in self.packets)
         all_lost = sum(packet.status == "DROPPED" for packet in self.packets)
+        data_latencies = [
+            packet.latency
+            for packet in self.packets
+            if packet.kind == "DATA"
+            and packet.status == "DELIVERED"
+            and packet.latency is not None
+        ]
         return {
             "protocol": "TCP",
             "flow_id": self.flow_id,
@@ -277,6 +292,13 @@ class TCPConnection:
             ),
             "bytes_sent": self.bytes_sent,
             "bytes_transferred": self.bytes_transferred,
+            "average_latency": (
+                sum(data_latencies) / len(data_latencies)
+                if data_latencies
+                else 0.0
+            ),
+            "minimum_latency": min(data_latencies) if data_latencies else 0.0,
+            "maximum_latency": max(data_latencies) if data_latencies else 0.0,
             "current_rtt_ms": samples[-1] * 1000 if samples else None,
             "average_rtt_ms": sum(samples) / len(samples) * 1000 if samples else None,
             "min_rtt_ms": min(samples) * 1000 if samples else None,

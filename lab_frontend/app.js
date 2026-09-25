@@ -207,8 +207,8 @@ function transportLabInspector(){
   const stateOrder=['CLOSED','SYN_SENT','SYN_RECEIVED','ESTABLISHED','FIN_WAIT','CLOSE_WAIT','LAST_ACK','TIME_WAIT','CLOSED'];
   const currentState=protocol==='TCP'?(active?.state||'CLOSED'):'CONNECTIONLESS';
   const comparison=state.transport?.result;
-  const comparisonHtml=comparison?.results?.length?`<table class="diagnostic-table"><thead><tr><th>Protocol</th><th>Latency</th><th>PDR</th><th>Retrans.</th><th>Setup</th></tr></thead><tbody>${comparison.results.map(row=>`<tr><td>${esc(row.protocol)}</td><td>${fmt((row.average_latency||0)*1000,1)} ms</td><td>${fmt(row.packet_delivery_ratio??row.data_packet_delivery_ratio??0,1)}%</td><td>${fmt(row.retransmissions??row.retransmission_count??0,0)}</td><td>${row.connection_setup_time==null?'—':`${fmt(row.connection_setup_time*1000,1)} ms`}</td></tr>`).join('')}</tbody></table>`:'';
-  const loss=100-(protocolStats.packet_delivery_ratio??protocolStats.data_packet_delivery_ratio??0);
+  const comparisonHtml=comparison?.results?.length?`<table class="diagnostic-table"><thead><tr><th>Protocol</th><th>Latency</th><th>PDR</th><th>Retrans.</th><th>Setup</th></tr></thead><tbody>${comparison.results.map(row=>`<tr><td>${esc(row.protocol)}</td><td>${fmt((row.average_latency||0)*1000,1)} ms</td><td>${fmt(row.data_packet_delivery_ratio??row.packet_delivery_ratio??0,1)}%</td><td>${fmt(row.retransmissions??row.retransmission_count??0,0)}</td><td>${row.connection_setup_time==null?'—':`${fmt(row.connection_setup_time*1000,1)} ms`}</td></tr>`).join('')}</tbody></table>`:'';
+  const loss=100-(protocolStats.data_packet_delivery_ratio??protocolStats.packet_delivery_ratio??0);
   const metrics=[
     ['Data packets',protocolStats.data_packets_sent??protocolStats.packets_sent??0],
     ['Delivered',protocolStats.data_packets_delivered??protocolStats.packets_delivered??0],
