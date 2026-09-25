@@ -4,7 +4,73 @@
 
 ![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-308%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-309%20Passed-success)
+
+## Quick Start — Run the Lab
+
+```bash
+# 1. dependencies (once)
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\pip install -r requirements.txt
+
+# 2. start the primary interactive network laboratory
+.venv/bin/python lab_server.py --host 0.0.0.0 --port 8765
+
+# 3. open the lab
+#    http://localhost:8765/
+
+# 4. run the complete test suite (309 tests)
+.venv/bin/python -m pytest -q
+
+# 5. optional: secondary Streamlit analytics + experiment labs
+.venv/bin/streamlit run app.py
+```
+
+| Command | What it starts | URL |
+|---|---|---|
+| `.venv/bin/python lab_server.py --host 0.0.0.0 --port 8765` | Primary editable network laboratory (topology workbench, all labs) | **http://localhost:8765/** |
+| `.venv/bin/streamlit run app.py` | Secondary analytics workspace: QoS Lab, Routing Lab, Combined Lab, Scenario Lab | http://localhost:8501 |
+| `.venv/bin/python -m pytest -q` | Full test suite (309 tests, ~6 s) | — |
+
+**Why the preview link shows `https://` but the app is `http://localhost:8765/`.** They are the
+same application. `lab_server.py` speaks plain HTTP on port 8765 inside the workspace
+(`http://localhost:8765/` is the address to use locally). The hosted preview you open in the browser
+is reached through a managed TLS-terminating proxy on the Freebuff side: it accepts `https://` from
+the browser, decrypts it, and forwards the request over `http://` to `localhost:8765`. So:
+
+- `https://<preview-host>/` = your browser → encrypted → Freebuff proxy → `http://localhost:8765/`
+- `http://localhost:8765/` = direct, unencrypted, local access to the same server process.
+
+The lab itself is not served over TLS, and it does not need to be: there is no account, no
+cookie/session state, and no secret in the request path. The proxy simply makes the preview safe to
+expose to a browser outside the machine.
+
+---
+
+## Table of Contents
+
+- [Quick Start — Run the Lab](#quick-start--run-the-lab)
+- [Overview](#overview)
+- [Primary Network Laboratory](#primary-network-laboratory--editable-topology-workbench)
+- [Architecture](#architecture)
+- [Core Modules](#core-modules)
+- [Stage 1–3 — Core simulation, self-healing, flows, dashboard](#implemented-features-stage-23)
+- [Stage 4 — Advanced QoS Laboratory](#stage-4--advanced-qos-laboratory)
+- [Stage 5 — Advanced Adaptive Routing](#stage-5--advanced-adaptive-routing)
+- [Combined Routing + QoS Experiment](#combined-routing--qos-experiment)
+- [Stage 6 — Scenarios & Resilience](#stage-6--advanced-network-scenarios--resilience-evaluation)
+- [Stage 7 — Infrastructure, ARP, ICMP](#stage-7--network-infrastructure-arp-and-icmp)
+- [Stage 8A — Diagnostics & Packet Inspection](#stage-8a--network-diagnostics-and-packet-inspection)
+- [Stage 9 — TCP + UDP Transport](#stage-9--tcp--udp-transport-layer-simulation)
+- [Stage 10 — Services & Security](#stage-10--network-services--basic-network-security)
+- [Stage 11 — Learning Mode & Evaluation](#stage-11--learning-mode-interactive-evaluation--final-polish)
+- [Installation](#installation)
+- [Run Application](#run-application)
+- [Run Tests](#run-tests)
+- [Demonstration Scenario](#demonstration-scenario-required)
+- [Known Limitations](#known-limitations)
+
+---
 
 ## Overview
 
@@ -132,6 +198,84 @@ Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · S
 
 **Simulation Engine is Source of Truth** — UI only visualizes engine data, no fake metrics.
 
+### System architecture
+
+```mermaid
+flowchart LR
+    subgraph Browser["Browser (lab_frontend/)"]
+        UI["SVG topology workbench<br/>palette · canvas · inspectors · timeline"]
+    end
+
+    subgraph Server["lab_server.py — stdlib HTTP API"]
+        API["POST /api/action<br/>GET /api/state"]
+    end
+
+    subgraph Session["lab_session.py — LabSession (authoritative state)"]
+        WS["topology CRUD · presets · undo/redo"]
+        TRA["traffic · faults · transport · services · security"]
+    end
+
+    subgraph Engine["Simulation engine"]
+        TOPO["topology.py<br/>NetworkX graph, links, conditions"]
+        ROUTE["routing.py<br/>Dijkstra / Bellman-Ford + weights"]
+        QOS["qos.py<br/>FIFO / Priority / WFQ"]
+        SIM["simulator.py<br/>heartbeat, failure, rerouting, clock"]
+        PROTO["protocols.py · transport.py<br/>IPv4, MAC, ARP, ICMP, TCP, UDP"]
+        SVC["services_security.py<br/>DHCP DNS HTTP FTP SMTP firewall ACL"]
+    end
+
+    OUT["metrics.py · events.py<br/>latency, throughput, PDR, jitter,<br/>queue wait, recovery, route history"]
+
+    EXP["experiments.py · scenarios.py<br/>QoS / routing / stress / resilience"]
+
+    UI <-->|JSON over HTTP| API
+    API --> Session
+    Session --> Engine
+    SIM --> TOPO
+    SIM --> ROUTE
+    SIM --> QOS
+    SIM --> PROTO
+    PROTO --> SVC
+    SIM --> OUT
+    OUT --> Session
+    EXP -.reads the same engine.-> SIM
+    Session -->|state snapshot| UI
+```
+
+### Packet lifecycle — every animated packet follows this path
+
+```mermaid
+flowchart TD
+    A["Flow / diagnostic / protocol emits a packet<br/>(IP, ICMP, TCP, UDP)"] --> B{"Source device<br/>UP?"}
+    B -- No --> X1["DROPPED · SOURCE_DOWN"]
+    B -- Yes --> C["ARP / MAC resolution<br/>(protocols.py)"]
+    C --> D{"Service required<br/>and running?"}
+    D -- No --> X2["DROPPED · SERVICE_UNAVAILABLE"]
+    D -- Yes --> E{"Firewall / ACL<br/>permits 5-tuple?"}
+    E -- No --> X3["DROPPED · FIREWALL / ACL_BLOCK"]
+    E -- Yes --> F["AdaptiveRouter computes path<br/>Dijkstra or Bellman-Ford on live link cost"]
+    F --> G{"Route exists?"}
+    G -- No --> X4["DROPPED · NO_ROUTE"]
+    G -- Yes --> H["QoS scheduler enqueues<br/>FIFO · Priority · WFQ"]
+    H --> I["Per-hop transmission<br/>latency · bandwidth · loss · congestion"]
+    I --> J{"Delivered at next hop?"}
+    J -- No --> X5["DROPPED · CONGESTION / LINK_LOSS"]
+    J -- Yes --> K{"Destination reached?"}
+    K -- No --> I
+    K -- Yes --> L["DELIVERED · metrics.record()<br/>latency, size, route, class"]
+    L --> M["Canvas animates along Packet.route<br/>inspector + packet journey available"]
+    X1 --> M
+    X2 --> M
+    X3 --> M
+    X4 --> M
+    X5 --> M
+```
+
+Nothing on the canvas moves unless this flow completes: a packet that the engine drops is drawn
+at its source with the real drop reason (for example `NO_ROUTE`, `DESTINATION_UNREACHABLE`,
+`FIREWALL_BLOCK`) instead of being animated to the destination.
+
+
 ### Core Modules
 
 - `topology.py` — 10-node network (H1-H4 hosts, R1-R6 routers), link properties, UP/DOWN states, fixed layout positions
@@ -187,6 +331,43 @@ When link fails:
 When node fails: similar, removes all affected paths.
 
 If no alternative route: traffic fails/drops appropriately, event logged, metrics reflect failure.
+
+### Self-healing control loop
+
+```mermaid
+flowchart TD
+    T0["t = 0 · link L or node N fails<br/>LINK_FAILED / NODE_FAILED logged"] --> HB["Heartbeat monitor<br/>simulator.tick(heartbeat_interval)"]
+    HB --> CHK{"Heartbeat / TTL<br/>acknowledged?"}
+    CHK -- Yes --> OK["Healthy — keep current route"]
+    CHK -- No --> D{"Missed ><br/>detection timeout?"}
+    D -- No --> HB
+    D -- Yes --> FD["FAILURE_DETECTED<br/>detection_time recorded"]
+    FD --> EXC["Remove L / N from the routing graph<br/>affected flows marked stale"]
+    EXC --> RECALC["AdaptiveRouter recompute<br/>Dijkstra or Bellman-Ford on live cost"]
+    RECALC --> ALT{"Alternative path<br/>available?"}
+    ALT -- Yes --> RR["ROUTE_RECALCULATED + TRAFFIC_REROUTED<br/>active route highlight moves"]
+    ALT -- No --> DROP["Packets drop with NO_ROUTE<br/>metrics + event timeline record it"]
+    RR --> RESUME["Traffic resumes on the new path<br/>recovery_time measured"]
+    DROP --> HB
+    RESUME --> HB
+    OK --> HB
+```
+
+### Failure handling state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> HEALTHY
+    HEALTHY --> SUSPECT: heartbeat missed once
+    SUSPECT --> HEALTHY: heartbeat recovered
+    SUSPECT --> FAILED: missed > detection timeout
+    FAILED --> REROUTING: topology updated + recompute
+    REROUTING --> RECOVERED: alternate path found, traffic resumed
+    REROUTING --> ISOLATED: no route exists (NO_ROUTE)
+    RECOVERED --> HEALTHY: link/node restored
+    ISOLATED --> REROUTING: link/node restored, recompute
+    ISOLATED --> [*]: simulation stopped, NO_ROUTE reported
+```
 
 ### Dynamic Routing Demonstration
 
@@ -297,6 +478,26 @@ CONGESTION_CHANGED, PACKET_LOSS_CHANGED, BANDWIDTH_CHANGED
 
 Traffic classes: **Emergency, VoIP, Video, HTTP, FTP**.
 
+```mermaid
+flowchart TD
+    P["Arriving packet<br/>(class, size, arrival time)"] --> S{"Active scheduler"}
+    S -- FIFO --> F["Serve strictly in arrival order<br/>no class differentiation"]
+    S -- "Priority Queue" --> PR["Highest class priority first<br/>ties broken by arrival order"]
+    S -- WFQ --> W["Round virtual-time service<br/>each class earns share ∝ weight"]
+    F --> Q{"Queue empty?"}
+    PR --> Q
+    W --> Q
+    Q -- Yes --> IDLE["Line idle · link free"]
+    Q -- No --> SERVE["Transmit on the link<br/>bandwidth + congestion decide service time"]
+    SERVE --> STAT["Update QueueStats:<br/>packets_served, waiting_time = pop − arrival"]
+    STAT --> P
+    IDLE --> P
+```
+
+Long-run service share of a WFQ class converges to its configured weight, so no class starves —
+which is exactly what the priority scheduler trades away.
+
+
 ### Configurable priorities and weights
 
 - `configure_priorities({...})` changes the scheduling priority of each traffic class (new packets pick it up immediately, so Priority Queue ordering genuinely changes).
@@ -347,6 +548,80 @@ arrival-order queue and all classes genuinely compete at the same time.
 
 Both run on the same `NetworkTopology` and the same dynamic link cost, and both are selectable at
 runtime (`AdaptiveRouter(algorithm=...)`, `set_algorithm(...)`, dashboard control, `sim.set_router_algorithm(...)`).
+
+#### Dijkstra (label setting, binary heap)
+
+```text
+function shortest_path(graph, source, target, cost(u, v)):
+    dist   = {source: 0, others: +inf}
+    parent = {}
+    heap   = [(0, source)]
+    settled = {}
+    while heap not empty:
+        (d, u) = heap.pop_min()
+        if u in settled: continue
+        settled.add(u); settled_nodes += 1
+        if u == target: break
+        for each neighbour v of u on an UP link:
+            if v in settled: continue
+            alt = d + cost(u, v)          # live latency/loss/congestion/bandwidth/hop
+            if alt < dist[v]:             # relax
+                dist[v] = alt; parent[v] = u
+                heap.push((alt, v)); relaxations += 1
+    if dist[target] == +inf: return NO_ROUTE
+    return path(target)
+```
+
+#### Bellman-Ford (label correcting, early exit)
+
+```text
+function shortest_path(graph, source, target, cost):
+    dist   = {source: 0, others: +inf}
+    parent = {}
+    repeat:
+        changed = false
+        for each edge (u, v) on UP links:
+            if dist[u] + cost(u, v) < dist[v]:
+                dist[v] = dist[u] + cost(u, v); parent[v] = u
+                changed = true; relaxations += 1
+        iterations += 1
+    until not changed or iterations == |V| - 1
+    # a further improving pass would mean a negative cycle
+    if any edge still improves: report NEGATIVE_CYCLE
+    return path(target)
+```
+
+| Property | Dijkstra | Bellman-Ford |
+|---|---|---|
+| Strategy | label setting (finalises a node once) | label correcting (revisits until stable) |
+| Complexity | O((V + E) log V) | O(V · E) |
+| Negative weights | not supported | supported (detects negative cycles) |
+| Extra state | min-heap | parent/dist table |
+| Reported work | `settled_nodes`, `relaxations` | `iterations`, `relaxations` |
+| Route selected in this project | identical optimal path | identical optimal path |
+
+```mermaid
+flowchart LR
+    SRC["source"] -->|cost| N1["neighbour"]
+    SRC -->|cost| N2["neighbour"]
+    N1 -->|cost| N3["target"]
+    N2 -->|cost| N1
+    N2 -->|cost| N3
+    subgraph D["Dijkstra · label setting"]
+        D1["settle source (0)"] --> D2["settle cheapest unsettled"] --> D3["relax its neighbours"] --> D4["stop when target settles"]
+    end
+    subgraph B["Bellman-Ford · label correcting"]
+        B1["dist(source) = 0"] --> B2["relax every edge"] --> B3{"any change?"} --> B4["repeat until stable"]
+    end
+    OUT["identical optimal path + cost"]
+    D4 --> OUT
+    B4 --> OUT
+```
+
+The agreement between the two independent implementations on every source/destination pair is the
+cross-check that the routing layer is correct, and it is asserted in
+`test_stage4_5.py::test_routing_experiment_dijkstra_vs_bellman_ford_and_deterministic`.
+
 
 ### Configurable route-cost weights
 
@@ -603,18 +878,35 @@ Dependencies:
 
 ## Run Application
 
-Primary editable network laboratory:
+Primary editable network laboratory (this is the main app):
 
 ```bash
-python lab_server.py --port 8765
+# macOS / Linux
+.venv/bin/python lab_server.py --host 0.0.0.0 --port 8765
+
+# Windows
+.venv\Scripts\python lab_server.py --host 0.0.0.0 --port 8765
 ```
 
-Open `http://localhost:8765`.
+Open **http://localhost:8765/**
 
 Secondary Streamlit analytics and experiment labs:
 
 ```bash
-streamlit run app.py
+.venv/bin/streamlit run app.py     # http://localhost:8501
+```
+
+Both processes can run at the same time. If port 8765 is busy, stop the other
+process or start on a free port:
+
+```bash
+.venv/bin/python lab_server.py --port 9000   # then open http://localhost:9000/
+```
+
+Health check without opening a browser:
+
+```bash
+curl -s http://localhost:8765/api/state | head -c 200
 ```
 
 ## Run Tests
@@ -623,10 +915,14 @@ streamlit run app.py
 .venv/bin/python -m pytest -q
 ```
 
-Expected: all existing engine, scenario, workspace, Stage 7, and editable-lab tests pass.
+Expected: **309 passed** — engine, scenarios, workspace, transport, services and
+security, learning mode, and editable-lab integration tests.
 
 ```bash
-pytest test_stage6.py -v      # Stage 6 only
+.venv/bin/python -m pytest test_stage6.py -v      # Stage 6 scenarios only
+.venv/bin/python -m pytest test_stage4_5.py -v    # QoS + routing only
+.venv/bin/python -m pytest test_lab.py -v         # editable lab / session only
+.venv/bin/python -m pytest test_stage11.py -v     # learning / evaluation only
 ```
 
 ## Demonstration Scenario (Required)
@@ -799,7 +1095,7 @@ tests in `test_stage8.py`; the original transport suite adds 31 tests in
 `test_transport.py`; Stage 9 adds 33 transport acceptance tests in
 `test_stage9.py`; and Stage 10 adds 59 service and security acceptance tests in
 `test_stage10.py`; and Stage 11 adds 42 learning/evaluation acceptance tests in
-`test_stage11.py`. The complete repository suite is 308 passing tests.
+`test_stage11.py`. The complete repository suite is 309 passing tests.
 
 
 ## Stage 9 — TCP + UDP Transport Layer Simulation
@@ -818,6 +1114,24 @@ No real sockets or Internet connections are used.
 - Delivery, loss, latency, throughput, delivery ratio, and bytes transferred
   are measured from processed simulation packets.
 - Lost UDP packets remain lost and are never retransmitted.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client (PC1)
+    participant R as Routers (adaptive route)
+    participant S as Server (Server1)
+    C->>R: UDP datagram · seq n · VoIP class
+    R-->>C: no ACK — connectionless, no retransmission
+    Note over R: scheduler serves by WFQ/Priority/FIFO order
+    alt delivered
+        R->>S: UDP datagram (queue wait + link latency applied)
+        S-->>C: application payload recorded in metrics
+    else lost on a link
+        R--xC: packet dropped · PACKET_LOSS / CONGESTION
+    end
+```
+
 
 ### TCP
 
@@ -840,6 +1154,33 @@ No real sockets or Internet connections are used.
   `cwnd`, halves `ssthresh` (with a minimum of two), and returns to slow start.
 - FIN/ACK four-way termination passes through the real simulated packets and
   records `FIN_WAIT`, `CLOSE_WAIT`, `LAST_ACK`, `TIME_WAIT`, and `CLOSED`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant R as Routers
+    participant S as Server
+    C->>R: SYN (seq=x)
+    R->>S: SYN routed
+    S-->>R: SYN-ACK (seq=y, ack=x+1)
+    R-->>C: SYN-ACK
+    Note over C,S: ESTABLISHED
+    C->>R: DATA seq=x+1
+    R->>S: DATA
+    S-->>R: ACK x+1 (window advertised)
+    R-->>C: cumulative ACK
+    alt timeout (RTO expires, no ACK)
+        C->>R: RETRANSMIT DATA seq=x+1 (same seq no.)
+        S-->>C: ACK x+1
+    end
+    C->>R: FIN
+    R->>S: FIN
+    S-->>C: FIN-ACK
+    C-->>S: ACK
+    Note over C,S: CLOSED
+```
+
 
 ### Routing, QoS, inspection, and CLI integration
 
@@ -1274,6 +1615,21 @@ result["metrics"]    # real simulator metrics for the run
 `Previous / Next / Play / Pause / Reset` walk the real `EventLogger` output one
 event at a time. Every step shows the packet, source, destination, protocol,
 current device, route, event, and reason, taken from the simulator itself.
+
+```mermaid
+flowchart TD
+    R["Reset · clear engine, rebuild topic run"] --> N["Next"]
+    P["Previous"] --> V["Step back one event"]
+    PL["Play · auto-advance at the selected speed"] --> N
+    PA["Pause"] --> HOLD["Hold current event"]
+    N --> EV{"More events<br/>in the log?"}
+    EV -- Yes --> SHOW["Render step:<br/>packet · src · dst · protocol ·<br/>current device · route · event · reason"]
+    EV -- No --> END["Topic complete ·<br/>show summary + run again"]
+    SHOW --> N
+    HOLD --> N
+    V --> SHOW
+    END --> R
+```
 
 ```python
 mode.run("self_healing")
