@@ -4,6 +4,25 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
+from qos import TRAFFIC_CLASSES
+
+
+def jitter_from_latencies(latencies: List[float]) -> float:
+    """
+    Packet delay variation (RFC 3550 style mean absolute difference).
+
+    Computed from the latencies of consecutive delivered packets, in delivery
+    order. Returns seconds; ``0.0`` when fewer than two samples exist.
+    """
+    if len(latencies) < 2:
+        return 0.0
+
+    total = 0.0
+    for previous, current in zip(latencies, latencies[1:]):
+        total += abs(current - previous)
+
+    return total / (len(latencies) - 1)
+
 
 @dataclass
 class PacketRecord:
@@ -15,6 +34,8 @@ class PacketRecord:
     status: str
     flow_id: str | None = None
     route: List[str] | None = None
+    traffic_type: str | None = None
+    queue_wait: float | None = None
 
 
 @dataclass
@@ -47,6 +68,9 @@ class Metrics:
         status: str,
         flow_id: str | None = None,
         route: List[str] | None = None,
+        *,
+        traffic_type: str | None = None,
+        queue_wait: float | None = None,
     ) -> None:
         self.records.append(
             PacketRecord(
@@ -58,6 +82,8 @@ class Metrics:
                 status,
                 flow_id=flow_id,
                 route=route,
+                traffic_type=traffic_type,
+                queue_wait=queue_wait,
             )
         )
 
@@ -75,6 +101,14 @@ class Metrics:
             r.latency
             for r in self.records
             if r.status == "DELIVERED" and r.latency is not None
+        ]
+
+        delivery_order_latencies = [
+            r.latency
+            for r in sorted(
+                (r for r in self.records if r.status == "DELIVERED" and r.latency is not None),
+                key=lambda r: (r.delivered_time if r.delivered_time is not None else r.sent_time),
+            )
         ]
 
         total_bytes = sum(
@@ -115,6 +149,7 @@ class Metrics:
                 sum(latencies) / len(latencies)
                 if latencies else 0.0
             ),
+            "jitter": jitter_from_latencies(delivery_order_latencies),
             "packet_loss": (
                 dropped / sent * 100
                 if sent else 0.0
@@ -163,6 +198,78 @@ class Metrics:
             if r.component == component and r.recovery_time is None:
                 r.recovery_time = recovery_time
                 break
+
+    # ------------------------------------------------------------------
+    # Per traffic-class QoS metrics (Stage 4)
+    # ------------------------------------------------------------------
+    def records_for_class(self, traffic_class: str) -> List[PacketRecord]:
+        return [r for r in self.records if r.traffic_type == traffic_class]
+
+    def class_metrics(
+        self,
+        current_time: float | None = None,
+        classes: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Latency, jitter, throughput, loss, PDR and queue waiting time for every
+        traffic class, aggregated from real packet records.
+        """
+        duration = max(float(current_time or 0.0), 0.001)
+        result: Dict[str, Dict[str, Any]] = {}
+
+        for traffic_class in (classes or TRAFFIC_CLASSES):
+            records = self.records_for_class(traffic_class)
+            sent = len(records)
+            delivered_records = [r for r in records if r.status == "DELIVERED"]
+            dropped = sum(1 for r in records if r.status == "DROPPED")
+            delivered = len(delivered_records)
+
+            latencies = [
+                r.latency for r in delivered_records if r.latency is not None
+            ]
+            ordered_latencies = [
+                r.latency
+                for r in sorted(
+                    delivered_records,
+                    key=lambda r: (
+                        r.delivered_time if r.delivered_time is not None else r.sent_time
+                    ),
+                )
+                if r.latency is not None
+            ]
+            waits = [r.queue_wait for r in records if r.queue_wait is not None]
+            delivered_bytes = sum(r.size for r in delivered_records)
+
+            result[traffic_class] = {
+                "traffic_class": traffic_class,
+                "packets_sent": float(sent),
+                "packets_delivered": float(delivered),
+                "packets_dropped": float(dropped),
+                "average_latency": (
+                    sum(latencies) / len(latencies) if latencies else 0.0
+                ),
+                "jitter": jitter_from_latencies(ordered_latencies),
+                "throughput": delivered_bytes / duration,
+                "packet_loss": (dropped / sent * 100) if sent else 0.0,
+                "packet_delivery_ratio": (delivered / sent * 100) if sent else 0.0,
+                "average_queue_wait": (
+                    sum(waits) / len(waits) if waits else 0.0
+                ),
+                "max_queue_wait": max(waits) if waits else 0.0,
+                "delivered_bytes": float(delivered_bytes),
+            }
+
+        return result
+
+    def class_dataframe(
+        self,
+        current_time: float | None = None,
+        classes: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """Per-class QoS metrics as a DataFrame (one row per traffic class)."""
+        metrics = self.class_metrics(current_time, classes)
+        rows = [dict(values) for values in metrics.values()]
+        return pd.DataFrame(rows)
 
     def dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.history)

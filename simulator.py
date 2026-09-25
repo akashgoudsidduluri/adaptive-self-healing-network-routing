@@ -5,8 +5,21 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from topology import NetworkTopology
-from routing import AdaptiveRouter
-from qos import Packet, create_scheduler, PRIORITIES
+from routing import (
+    AdaptiveRouter,
+    ALGORITHM_LABELS,
+    ROUTING_WEIGHT_NAMES,
+)
+from qos import (
+    Packet,
+    PRIORITIES,
+    TRAFFIC_CLASSES,
+    configure_priorities,
+    create_scheduler,
+    normalize_class_weights,
+    normalize_scheduler_name,
+    reset_priorities,
+)
 from metrics import Metrics, RecoveryRecord
 from events import EventLogger, EventType
 
@@ -75,11 +88,16 @@ class NetworkSimulator:
         seed: int = 42,
         heartbeat_interval: float = 1.0,
         failure_detection_timeout: float = 3.0,
+        algorithm: str = "dijkstra",
+        scheduler_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.topology = topology or NetworkTopology()
         self.router = router or AdaptiveRouter()
-        self.scheduler_name = scheduler
-        self.scheduler = create_scheduler(scheduler)
+        if algorithm:
+            self.router.set_algorithm(algorithm)
+        self.scheduler_name = normalize_scheduler_name(scheduler)
+        self.scheduler_params: Dict[str, Any] = dict(scheduler_params or {})
+        self.scheduler = create_scheduler(self.scheduler_name, **self.scheduler_params)
 
         self.rng = random.Random(seed)
         self.seed = seed
@@ -212,9 +230,14 @@ class NetworkSimulator:
             creation_time=ctime,
         )
 
+        # Draw the loss decision at creation so that every configuration being
+        # compared (scheduler / routing algorithm) sees exactly the same
+        # random realisation.
+        packet.loss_roll = self.rng.random()
+
         self.next_packet_id += 1
         self.packets.append(packet)
-        self.scheduler.push(packet)
+        self.scheduler.push(packet, now=max(self.time, ctime))
 
         self._log_event(
             EventType.PACKET_GENERATED,
@@ -266,6 +289,36 @@ class NetworkSimulator:
         pps: float = 10.0,
         duration: float = 5.0,
     ) -> TrafficFlow:
+        flow = self._register_flow(
+            source,
+            destination,
+            traffic_type,
+            packet_count=packet_count,
+            packet_size=packet_size,
+            pps=pps,
+            duration=duration,
+        )
+
+        # Generate packets for this flow
+        self._generate_packets_for_flow(flow)
+
+        # Snapshot baseline if first flow
+        if len(self.metrics.history) == 0:
+            self.metrics.snapshot(self.time, self.average_congestion(), len(self.active_flows))
+
+        return flow
+
+    def _register_flow(
+        self,
+        source: str,
+        destination: str,
+        traffic_type: str = "HTTP",
+        packet_count: int = 10,
+        packet_size: int = 1000,
+        pps: float = 10.0,
+        duration: float = 5.0,
+    ) -> TrafficFlow:
+        """Validate and register a traffic flow without generating packets."""
         if source == destination:
             raise ValueError("Source and destination must differ.")
         if not self.topology.active_node(source):
@@ -278,7 +331,7 @@ class NetworkSimulator:
         flow_id = f"flow-{self.flow_counter}"
         self.flow_counter += 1
 
-        # Calculate initial route
+        # Calculate initial route using the live router configuration
         try:
             route, cost = self.router.shortest_path(self.topology, source, destination)
             route_status = "HEALTHY"
@@ -319,14 +372,72 @@ class NetworkSimulator:
             route_cost=cost,
         )
 
-        # Generate packets for this flow
-        self._generate_packets_for_flow(flow)
-
-        # Snapshot baseline if first flow
-        if len(self.metrics.history) == 0:
-            self.metrics.snapshot(self.time, self.average_congestion(), len(self.active_flows))
-
         return flow
+
+    def generate_interleaved_traffic(
+        self,
+        source: str,
+        destination: str,
+        classes: Optional[List[str]] = None,
+        packets_per_class: int = 10,
+        packet_size: int = 1000,
+        pps: float = 10.0,
+    ) -> Dict[str, TrafficFlow]:
+        """
+        Generate a mixed-class packet stream in strict arrival order.
+
+        One flow per traffic class is created, and packets are emitted
+        round-robin across the classes so that all classes compete at the same
+        time. Emitting packets in arrival order is what makes FIFO, Priority
+        and WFQ orderings genuinely comparable.
+        """
+        class_list = list(classes or TRAFFIC_CLASSES)
+        unknown = [name for name in class_list if name not in PRIORITIES]
+        if unknown:
+            raise ValueError(f"Unknown traffic types: {unknown}")
+        if not class_list:
+            return {}
+
+        interval = 1.0 / max(pps, 0.1)
+        width = len(class_list)
+
+        flows: Dict[str, TrafficFlow] = {}
+        for traffic_class in class_list:
+            flows[traffic_class] = self._register_flow(
+                source,
+                destination,
+                traffic_class,
+                packet_count=packets_per_class,
+                packet_size=packet_size,
+                pps=pps,
+                duration=packets_per_class / max(pps, 0.1),
+            )
+
+        # Round-robin arrival schedule: every class appears in every cycle, so
+        # arrivals are interleaved and FIFO is a true arrival-order queue.
+        for cycle in range(packets_per_class):
+            for index, traffic_class in enumerate(class_list):
+                flow = flows[traffic_class]
+                creation_time = self.time + (cycle * width + index) * interval
+                packet = self.generate_packet(
+                    source,
+                    destination,
+                    traffic_class,
+                    packet_size,
+                    flow_id=flow.flow_id,
+                    creation_time=creation_time,
+                )
+                flow.packet_ids.append(packet.packet_id)
+                flow.packets_sent += 1
+
+        self.metrics.active_flows_count = len(self.active_flows)
+
+        if len(self.metrics.history) == 0:
+            self.metrics.snapshot(
+                self.time, self.average_congestion(), len(self.active_flows)
+            )
+
+        return flows
 
     def _generate_packets_for_flow(self, flow: TrafficFlow) -> List[Packet]:
         """Generate actual Packet objects for a flow."""
@@ -415,7 +526,9 @@ class NetworkSimulator:
         if self.scheduler.empty():
             return None
 
-        packet = self.scheduler.pop()
+        # Pop with the current simulation time so the scheduler can measure the
+        # real queue waiting time of the packet.
+        packet = self.scheduler.pop(now=self.time)
 
         # Find flow if associated
         flow = None
@@ -443,6 +556,8 @@ class NetworkSimulator:
                 "DROPPED",
                 flow_id=flow.flow_id if flow else None,
                 route=None,
+                traffic_type=packet.traffic_type,
+                queue_wait=packet.queue_wait_time,
             )
 
             if flow:
@@ -517,7 +632,13 @@ class NetworkSimulator:
         # For latency calculation, use transmission delay plus any queuing
         latency = transmission_delay
 
-        if self.rng.random() < loss_probability:
+        loss_draw = (
+            packet.loss_roll
+            if packet.loss_roll is not None
+            else self.rng.random()
+        )
+
+        if loss_draw < loss_probability:
             packet.delivery_status = "DROPPED"
 
             self.metrics.record(
@@ -529,6 +650,8 @@ class NetworkSimulator:
                 "DROPPED",
                 flow_id=flow.flow_id if flow else None,
                 route=path,
+                traffic_type=packet.traffic_type,
+                queue_wait=packet.queue_wait_time,
             )
 
             if flow:
@@ -557,6 +680,8 @@ class NetworkSimulator:
                 "DELIVERED",
                 flow_id=flow.flow_id if flow else None,
                 route=path,
+                traffic_type=packet.traffic_type,
+                queue_wait=packet.queue_wait_time,
             )
 
             if flow:
@@ -1063,6 +1188,137 @@ class NetworkSimulator:
     def set_bandwidth(self, u: str, v: str, value: float) -> None:
         self.set_link_conditions(u, v, bandwidth=value)
 
+    # ------------------------------------------------------------------
+    # Stage 4/5 configuration: QoS scheduler, priorities, weights, routing
+    # ------------------------------------------------------------------
+    def set_scheduler(self, name: str, **params: Any) -> str:
+        """Switch the packet scheduler and apply it to the simulation engine."""
+        self.scheduler_name = normalize_scheduler_name(name)
+        if params:
+            self.scheduler_params.update(params)
+        self.scheduler = create_scheduler(
+            self.scheduler_name, **self.scheduler_params
+        )
+        self._log_event(
+            EventType.SCHEDULER_CHANGED,
+            f"QoS scheduler set to {self.scheduler_name}",
+            scheduler=self.scheduler_name,
+        )
+        return self.scheduler_name
+
+    def set_wfq_weights(self, weights: Dict[str, float]) -> Dict[str, float]:
+        """Configure the WFQ service weights (applies to the live WFQ queue)."""
+        resolved = normalize_class_weights(
+            {**self.scheduler_params.get("weights", {}), **weights}
+        )
+        self.scheduler_params["weights"] = resolved
+        if hasattr(self.scheduler, "set_weights"):
+            self.scheduler.set_weights(resolved)
+        self._log_event(
+            EventType.QOS_CONFIG_CHANGED,
+            "WFQ weights updated",
+            weights=dict(resolved),
+        )
+        return resolved
+
+    def get_wfq_weights(self) -> Dict[str, float]:
+        if hasattr(self.scheduler, "get_weights"):
+            return self.scheduler.get_weights()
+        return normalize_class_weights(self.scheduler_params.get("weights"))
+
+    def set_priority_config(self, priorities: Dict[str, float]) -> Dict[str, float]:
+        """Configure traffic-class scheduling priorities."""
+        resolved = configure_priorities(priorities)
+        self.scheduler_params["priorities"] = resolved
+        if hasattr(self.scheduler, "set_priorities"):
+            self.scheduler.set_priorities(resolved)
+        self._log_event(
+            EventType.QOS_CONFIG_CHANGED,
+            "Traffic-class priorities updated",
+            priorities=dict(resolved),
+        )
+        return resolved
+
+    def reset_traffic_priorities(self) -> Dict[str, float]:
+        return reset_priorities()
+
+    def get_priority_config(self) -> Dict[str, float]:
+        return dict(PRIORITIES)
+
+    def set_router_algorithm(self, algorithm: str) -> str:
+        """Select Dijkstra or Bellman-Ford for all future route computation."""
+        selected = self.router.set_algorithm(algorithm)
+        self._log_event(
+            EventType.ROUTING_ALGORITHM_CHANGED,
+            f"Routing algorithm set to {ALGORITHM_LABELS.get(selected, selected)}",
+            algorithm=selected,
+        )
+        return selected
+
+    def get_router_algorithm(self) -> str:
+        return self.router.get_algorithm()
+
+    def set_routing_weights(self, **weights: float) -> Dict[str, float]:
+        """Update the route-cost weights used by the live router."""
+        unknown = set(weights) - set(ROUTING_WEIGHT_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown routing weights: {sorted(unknown)}")
+
+        resolved = self.router.configure_weights(dict(weights))
+        self._log_event(
+            EventType.ROUTING_WEIGHTS_CHANGED,
+            "Routing weights updated",
+            weights=dict(resolved),
+        )
+
+        # Re-evaluate active flows so weight changes take effect immediately.
+        for flow in self.active_flows.values():
+            if flow.status == "FAILED":
+                continue
+            try:
+                new_route, new_cost = self.router.shortest_path(
+                    self.topology, flow.source, flow.destination
+                )
+            except ValueError:
+                continue
+            if new_route != flow.current_route:
+                flow.previous_route = flow.current_route.copy()
+                flow.current_route = new_route
+                flow.route_cost = new_cost
+                flow.route_status = "REROUTED"
+                self._log_event(
+                    EventType.ROUTE_RECALCULATED,
+                    f"Route recalculated after weight change for flow {flow.flow_id}: "
+                    f"{' → '.join(new_route)} cost={new_cost:.2f}",
+                    flow_id=flow.flow_id,
+                    old_route=flow.previous_route,
+                    new_route=new_route,
+                    route_cost=new_cost,
+                )
+
+        return resolved
+
+    def get_routing_weights(self) -> Dict[str, float]:
+        return self.router.get_weights()
+
+    # ------------------------------------------------------------------
+    # QoS statistics (Stage 4)
+    # ------------------------------------------------------------------
+    def scheduler_statistics(self) -> Dict[str, float]:
+        """Queue statistics of the active scheduler."""
+        return self.scheduler.queue_statistics()
+
+    def scheduler_class_statistics(self) -> Dict[str, Dict[str, float]]:
+        """Per-class enqueue / serve counters and occupancy of the scheduler."""
+        return self.scheduler.class_statistics()
+
+    def class_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Per traffic-class QoS metrics from real packet records."""
+        return self.metrics.class_metrics(self.time, list(TRAFFIC_CLASSES))
+
+    def class_dataframe(self) -> pd.DataFrame:
+        return self.metrics.class_dataframe(self.time, list(TRAFFIC_CLASSES))
+
     def average_congestion(self) -> float:
         edges = list(self.topology.graph.edges(data=True))
 
@@ -1104,7 +1360,6 @@ class NetworkSimulator:
 
     def reset(self) -> None:
         self.topology.reset()
-        self.scheduler = create_scheduler(self.scheduler_name)
         self.metrics.reset()
 
         self.time = 0.0
@@ -1121,6 +1376,9 @@ class NetworkSimulator:
         self.active_flows.clear()
         self.flow_counter = 1
         self.flow_history.clear()
+
+        # Re-create the scheduler with the configured QoS parameters.
+        self.scheduler = create_scheduler(self.scheduler_name, **self.scheduler_params)
 
         self.last_heartbeat_check = 0.0
         self.baseline_metrics = None
