@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Stage-6%20Complete-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-93%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-98%20Passed-success)
 
 ## Overview
 
@@ -31,8 +31,33 @@ Traditional shortest-path routing may continue using a route even when its curre
   parameter to measure sensitivity
 - Measure performance with real simulated packets
 - Visualize topology, routes, failures, and performance interactively
+- Operate a Packet Tracer-style SVG workspace with real packet animation, device/link inspection,
+  simulation controls, live queues and an event timeline
 
 This is a **simulation-based Computer Networks educational project**, not production router software.
+
+## Interactive Network Workspace
+
+The default application view is now a live network laboratory rather than an analytics dashboard.
+A custom SVG workspace renders the existing 10-device topology with router and PC symbols, status
+LEDs, cable labels, congestion colours, failed links and the engine-selected active route.
+
+- **Real packet animation:** `STEP`, `PLAY` and `RUN ALL` call
+  `NetworkSimulator.process_next_packet()`. The SVG animates the returned packet along its actual
+  `Packet.route`; it does not generate independent frontend traffic.
+- **Traffic classes:** Emergency, VoIP, Video, HTTP and FTP use distinct packet colours and real
+  scheduler priority.
+- **Simulation controls:** reset, step, play, pause, run-all, 1x/2x/5x/10x speed and simulation time.
+- **Traffic generator:** source, destination, class, packet size/count/rate and SEND PACKETS.
+- **Inspection:** click a packet, device or cable in the workspace, or use the lower packet/device/
+  link/queue/event/metrics panels.
+- **Faults and conditions:** fail/recover links and nodes; edit congestion, packet loss and bandwidth.
+  A failed link advances the real simulation clock through heartbeat detection and rerouting.
+- **Routing and QoS:** select Dijkstra/Bellman-Ford, edit real route-cost weights, and switch the live
+  scheduler between FIFO, Priority Queue and WFQ.
+
+The original Plotly topology, traffic controls, charts, QoS Lab, Routing Lab, Combined Lab and
+Scenario Lab remain available below the workspace as secondary analysis and experiment surfaces.
 
 ---
 
@@ -56,7 +81,9 @@ Experiment Engine (experiments.py: QoS / stress / routing / combined)
 Scenario Framework (scenarios.py: presets, phased runs, resilience, multi-run,
                     route stability, sensitivity, comparison, export)
    ↓
-Streamlit Dashboard (Network & Traffic · QoS Lab · Routing Lab · Combined Lab · Scenario Lab)
+Interactive SVG Workspace (real packet/event state + inspectors)
+   ↓
+Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · Scenario)
 ```
 
 **Simulation Engine is Source of Truth** — UI only visualizes engine data, no fake metrics.
@@ -71,12 +98,14 @@ Streamlit Dashboard (Network & Traffic · QoS Lab · Routing Lab · Combined Lab
 - `metrics.py` — Packet tracking, latency, throughput, PDR, loss, congestion, recovery time, time-series history, before/during/after comparison
 - `events.py` — Structured event system (TRAFFIC_STARTED, LINK_FAILED, FAILURE_DETECTED, ROUTE_RECALCULATED, TRAFFIC_REROUTED, etc.)
 - `simulator.py` — Central engine: heartbeat monitoring, failure detection with measurable delay, automatic rerouting, active traffic flows, congestion/loss/bandwidth effects, simulation clock
-- `app.py` — Streamlit interactive dashboard
+- `app.py` — Streamlit shell: primary network workspace plus all existing analysis/experiment labs
+- `network_workspace.py` — Engine-backed SVG workspace, real packet trace stepping, inspectors, controls and secondary panels
 - `scenario_lab.py` — Stage 6 "Scenario Lab" tab (rendered by `app.py`)
 - `test_simulation.py` — Stage 1 tests
 - `test_stage2.py` — Stage 2+3 tests (heartbeat, detection, rerouting, flows, etc.)
 - `test_stage4_5.py` — Stage 4+5 tests (routing algorithms, weights, schedulers, per-class metrics, queue statistics, deterministic experiments)
 - `test_stage6.py` — Stage 6 tests (scenario presets, application/reset, phased runs, resilience, route history, reproducibility, multi-run, sensitivity, comparison, export)
+- `test_workspace.py` — Live workspace regression tests (real packet routes/events, drops, heartbeat rerouting, topology state, SVG motion payload)
 
 ---
 
@@ -512,7 +541,7 @@ Dependencies:
 - networkx>=3.2
 - numpy>=1.26
 - pandas>=2.0
-- streamlit>=1.35
+- streamlit>=1.37
 - plotly>=5.20
 - pytest>=8.0
 
@@ -530,7 +559,7 @@ Open browser at displayed URL (typically http://localhost:8501).
 pytest -v
 ```
 
-Expected: 93 tests passed (14 Stage 1 + 22 Stage 2+3 + 23 Stage 4+5 + 34 Stage 6).
+Expected: 98 tests passed (14 Stage 1 + 22 Stage 2+3 + 23 Stage 4+5 + 34 Stage 6 + 5 interactive workspace).
 
 ```bash
 pytest test_stage6.py -v      # Stage 6 only
@@ -541,20 +570,18 @@ pytest test_stage6.py -v      # Stage 6 only
 This workflow must work through UI:
 
 1. **Open NetAdapt**: `streamlit run app.py`
-2. **Observe network topology**: 10 nodes, multiple paths, default positions
-3. **Select**: Source=H1, Destination=H3
-4. **Generate Video traffic**: 20 packets, 1000 bytes, 10 pps
-5. **Run Simulation**: Click "Run Simulation", observe active route (e.g., H1→R1→R3→R5→H3), packets, latency, throughput, loss, PDR
-6. **Introduce congestion**: Select link R1-R3, set congestion 0.8, observe if adaptive routing changes route based on calculated cost
-7. **Fail internal link**: Select R3-R5, click "Fail Link" — system advances time by detection timeout + 0.5s
-8. **Heartbeat detection**: Check event log for `FAILURE_DETECTED` after measurable delay (e.g., 2.0s)
-9. **Routing recalculates**: Event log shows `ROUTE_RECALCULATED`
-10. **Traffic rerouted**: Event log shows `TRAFFIC_REROUTED`, active route changes to alternative (e.g., via R4)
-11. **Event log records**: failure, detection, recalculation, rerouting with simulation timestamps
-12. **Observe changed metrics**: Latency may increase, throughput may change, PDR affected
-13. **Recover failed link**: Select R3-R5, click "Recover Link"
-14. **Continue simulation**: Generate new traffic, run simulation
-15. **Compare before/after**: Performance graphs show time-series, comparison table shows before/during/after metrics
+2. **Observe the live SVG workspace**: PC/router icons, cables, conditions, queue and active route
+3. **Configure traffic**: PC1 → PC3, Video, 20 packets, 1500 bytes, 10 packets/sec
+4. **Click SEND PACKETS**: queued packets appear at PC1 and automatic playback starts
+5. **Use STEP / PLAY / PAUSE / RUN ALL**: every packet follows the route returned by the engine
+6. **Inspect a packet/device/link**: click its marker, icon or cable in the workspace
+7. **Introduce congestion**: select R1-R3 and apply a high congestion value; cable and route react
+8. **Fail R3-R5**: the cable turns red, heartbeat time advances, and the Events panel records failure/detection/recalculation/rerouting
+9. **Continue playback**: new packets use the actual recalculated route
+10. **Inject loss or change scheduler**: dropped packets show an X; queue occupancy follows the selected scheduler
+11. **Switch routing algorithm or weights**: the highlighted route is recalculated by the real router
+12. **Recover the link**: the engine records recovery and may return to a cheaper route
+13. **Open the lower labs**: QoS, Routing, Combined and Scenario analytics remain available
 
 All steps use real simulation engine, no hardcoded routes or fake metrics.
 
@@ -612,8 +639,9 @@ All steps use real simulation engine, no hardcoded routes or fake metrics.
 
 ```
 adaptive-self-healing-network-routing/
-├── app.py                 # Streamlit dashboard shell (header, tabs, shared helpers)
-├── scenario_lab.py        # Stage 6 Scenario Lab tab (new)
+├── app.py                 # Streamlit shell (workspace + preserved labs)
+├── network_workspace.py   # Interactive SVG workspace and real packet-step controller
+├── scenario_lab.py        # Stage 6 Scenario Lab tab
 ├── topology.py            # Network topology with positions
 ├── routing.py             # Dijkstra + Bellman-Ford, configurable weights, route analysis
 ├── qos.py                 # Packets, FIFO / Priority / WFQ, queue stats, class config
@@ -625,7 +653,8 @@ adaptive-self-healing-network-routing/
 ├── test_simulation.py     # Stage 1 tests
 ├── test_stage2.py         # Stage 2+3 tests
 ├── test_stage4_5.py       # Stage 4+5 tests
-├── test_stage6.py         # Stage 6 tests (new)
+├── test_stage6.py         # Stage 6 tests
+├── test_workspace.py      # Interactive workspace regression tests
 ├── requirements.txt       # Dependencies
 └── README.md
 ```
@@ -711,7 +740,8 @@ adaptive-self-healing-network-routing/
   degraded/failure phase was active; for scenarios without failures it is simply the middle phase of
   the workload.
 - No authentication/database/cloud (intentionally out of scope)
-- No Packet Tracer style packet animation (explicitly out of scope)
+- The engine models packet loss as one route-level decision, so the drop marker is placed near the
+  end of the animated route rather than on a uniquely identified physical loss link.
 
 ## License
 

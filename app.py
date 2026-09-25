@@ -1,7 +1,6 @@
 """
 NetAdapt — Adaptive and Self-Healing QoS-Based Network Routing System
-Interactive Streamlit dashboard: Stage 1-3 simulation + Stage 4/5 labs +
-Stage 6 scenario laboratory.
+Interactive network workspace + Stage 4/5 labs + Stage 6 scenario laboratory.
 
 The dashboard only visualises data produced by the simulation engine
 (``simulator.py`` / ``experiments.py`` / ``scenarios.py``). No metric is
@@ -37,6 +36,7 @@ from experiments import (
     run_routing_weight_experiment,
 )
 from scenario_lab import render_scenario_lab
+from network_workspace import render_network_workspace, render_workspace_controls
 
 
 st.set_page_config(
@@ -412,74 +412,51 @@ def download_frame(frame: pd.DataFrame, label: str, filename: str, key: str) -> 
 
 
 # ------------------------------------------------------------------
-# Header
+# Primary experience: live network workspace
 # ------------------------------------------------------------------
-st.title("🌐 NetAdapt")
-st.subheader("Adaptive and Self-Healing QoS-Based Network Routing System")
 st.markdown(
-    "*Interactive network simulation laboratory for adaptive routing, failure recovery, "
-    "QoS experiments, and routing comparisons. Every number on this page is produced by the "
-    "simulation engine.*"
+    """
+    <style>
+    .stApp { background: #080d14; color: #e6edf3; }
+    section[data-testid="stSidebar"] { background: #0b111a; border-right: 1px solid #263448; }
+    section[data-testid="stSidebar"] h3 { color: #67e8f9; letter-spacing: 0; }
+    div[data-testid="stMetric"] { background: #0f1925; border: 1px solid #263448; padding: 10px 12px; }
+    div[data-testid="stMetricLabel"] { color: #91a4ba; }
+    div[data-testid="stMetricValue"] { color: #f8fafc; }
+    div[data-testid="stMetricDelta"] { color: #67e8f9; }
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #263448; }
+    div[data-testid="stTabs"] [data-baseweb="tab"] { background: #0f1925; color: #9fb0c3; }
+    div[data-testid="stTabs"] [aria-selected="true"] { color: #67e8f9; border-color: #22d3ee; }
+    .stButton > button { min-height: 2.45rem; border: 1px solid #34465b; background: #101c2a; color: #dbeafe; }
+    .stButton > button:hover { border-color: #22d3ee; color: #ffffff; }
+    h1, h2, h3 { letter-spacing: 0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-
-# ------------------------------------------------------------------
-# Network Status (live simulation)
-# ------------------------------------------------------------------
-summary = sim.topology.summary()
-latest_metrics = (
-    sim.metrics.get_latest()
-    if sim.metrics.history
-    else sim.metrics.calculate(sim.time, sim.average_congestion(), len(sim.active_flows))
-)
-
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-col1.metric("Total Nodes", summary["nodes"])
-col2.metric(
-    "Active Nodes",
-    summary["active_nodes"],
-    delta=summary["active_nodes"] - summary["nodes"],
-    delta_color="normal",
-)
-col3.metric("Total Links", summary["links"])
-col4.metric(
-    "Active Links",
-    summary["active_links"],
-    delta=summary["active_links"] - summary["links"],
-    delta_color="normal",
-)
-col5.metric("Active Flows", len(sim.active_flows))
-col6.metric("Sim Time", f"{sim.time:.2f}s")
+with st.spinner("Loading network laboratory..."):
+    render_workspace_controls(sim)
+    st.markdown("## NetAdapt Network Simulator")
+    st.caption(
+        "LIVE WORKSPACE · packet animation, route selection, fault recovery and QoS state "
+        "are driven by the Python simulation engine."
+    )
+    render_network_workspace(sim)
 
 st.divider()
-st.markdown("### 📊 Live Metrics")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Avg Latency", f"{latest_metrics.get('average_latency', 0)*1000:.1f} ms")
-m2.metric("Throughput", f"{latest_metrics.get('throughput', 0):.0f} B/s")
-m3.metric("Packet Loss", f"{latest_metrics.get('packet_loss', 0):.1f}%")
-m4.metric("PDR", f"{latest_metrics.get('packet_delivery_ratio', 0):.1f}%")
-m5.metric("Congestion", f"{latest_metrics.get('congestion', 0):.1%}")
-m6.metric("Recovery Time", f"{latest_metrics.get('recovery_time', 0):.2f}s")
-
-live_scheduler, live_algorithm = st.columns(2)
-live_scheduler.caption(
-    f"🔧 Live QoS scheduler: **{sim.scheduler.queue_statistics()['scheduler']}**"
-)
-live_algorithm.caption(
-    f"🧭 Live routing algorithm: **{ALGORITHM_LABELS.get(sim.get_router_algorithm(), '?')}**"
+st.markdown("### Analysis & Experiments")
+st.caption(
+    "The original simulation controls and all analytical labs remain available below. "
+    "The workspace above is the primary interactive view."
 )
 
-st.divider()
-
-# ------------------------------------------------------------------
-# Tabs
-# ------------------------------------------------------------------
 tab_network, tab_qos, tab_routing, tab_combined, tab_scenario = st.tabs(
     [
-        "🛰️ Network & Traffic",
-        "🧪 QoS Lab",
-        "🧭 Routing Lab",
-        "🔬 Combined Lab",
-        "🧨 Scenario Lab",
+        "Legacy Traffic & Analytics",
+        "QoS Lab",
+        "Routing Lab",
+        "Combined Lab",
+        "Scenario Lab",
     ]
 )
 
