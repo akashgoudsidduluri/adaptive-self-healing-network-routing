@@ -2,9 +2,9 @@
 
 > An interactive Computer Networks simulation system that dynamically selects routes based on network conditions, detects failures, reroutes traffic automatically, applies QoS scheduling, and analyzes network performance.
 
-![Status](https://img.shields.io/badge/Stage-4%2B5%20Complete-brightgreen)
+![Status](https://img.shields.io/badge/Stage-6%20Complete-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-59%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-93%20Passed-success)
 
 ## Overview
 
@@ -23,6 +23,12 @@ Traditional shortest-path routing may continue using a route even when its curre
 - Apply QoS scheduling (FIFO, Priority Queue, WFQ)
 - Compare FIFO / Priority / WFQ on identical workloads with per-class latency, jitter, loss, PDR and queue waiting time
 - Compare Dijkstra and Bellman-Ford routing, and tune route-cost weights to change actual route selection
+- Run whole network scenarios (congestion, packet loss, reduced bandwidth, link/router/multiple
+  failures, combined degradations) from reusable, reproducible presets
+- Evaluate resilience: failure, detection, recalculation and recovery timing, packets affected and
+  packets delivered after recovery
+- Track route stability (the actual route history of every flow) and sweep a single network
+  parameter to measure sensitivity
 - Measure performance with real simulated packets
 - Visualize topology, routes, failures, and performance interactively
 
@@ -47,7 +53,10 @@ Metrics + Event Logging (overall + per traffic class + queue statistics)
    ↓
 Experiment Engine (experiments.py: QoS / stress / routing / combined)
    ↓
-Streamlit Dashboard (Network & Traffic · QoS Lab · Routing Lab · Combined Lab)
+Scenario Framework (scenarios.py: presets, phased runs, resilience, multi-run,
+                    route stability, sensitivity, comparison, export)
+   ↓
+Streamlit Dashboard (Network & Traffic · QoS Lab · Routing Lab · Combined Lab · Scenario Lab)
 ```
 
 **Simulation Engine is Source of Truth** — UI only visualizes engine data, no fake metrics.
@@ -58,13 +67,16 @@ Streamlit Dashboard (Network & Traffic · QoS Lab · Routing Lab · Combined Lab
 - `routing.py` — Manual **Dijkstra** and **Bellman-Ford** implementations (not `networkx.shortest_path`), selectable at runtime, dynamic cost = w_latency·latency + w_loss·loss + w_congestion·congestion + w_bandwidth·bandwidth + w_hop·hop, plus `analyze_route`/`route_info` route-condition analysis
 - `qos.py` — Packet model, traffic classes (Emergency, VoIP, Video, HTTP, FTP), FIFO, PriorityQueue, WFQ with configurable priorities/weights and full queue statistics
 - `experiments.py` — **Stage 4 + 5 experiment engine**: QoS scheduler comparison, congestion stress test, Dijkstra vs Bellman-Ford comparison, routing weight sensitivity, and the six-way combined experiment
+- `scenarios.py` — **Stage 6 scenario framework**: named scenario presets, the phased scenario runner (before / during / after), resilience evaluation, route-stability tracking, multi-run experiments, sensitivity sweeps, scenario comparison and CSV export
 - `metrics.py` — Packet tracking, latency, throughput, PDR, loss, congestion, recovery time, time-series history, before/during/after comparison
 - `events.py` — Structured event system (TRAFFIC_STARTED, LINK_FAILED, FAILURE_DETECTED, ROUTE_RECALCULATED, TRAFFIC_REROUTED, etc.)
 - `simulator.py` — Central engine: heartbeat monitoring, failure detection with measurable delay, automatic rerouting, active traffic flows, congestion/loss/bandwidth effects, simulation clock
 - `app.py` — Streamlit interactive dashboard
+- `scenario_lab.py` — Stage 6 "Scenario Lab" tab (rendered by `app.py`)
 - `test_simulation.py` — Stage 1 tests
 - `test_stage2.py` — Stage 2+3 tests (heartbeat, detection, rerouting, flows, etc.)
 - `test_stage4_5.py` — Stage 4+5 tests (routing algorithms, weights, schedulers, per-class metrics, queue statistics, deterministic experiments)
+- `test_stage6.py` — Stage 6 tests (scenario presets, application/reset, phased runs, resilience, route history, reproducibility, multi-run, sensitivity, comparison, export)
 
 ---
 
@@ -312,7 +324,161 @@ both algorithms, which isolates the QoS scheduler as the variable that changes p
 
 ---
 
-## Dashboard Tabs (Stage 4 + 5)
+# Stage 6 — Advanced Network Scenarios & Resilience Evaluation
+
+The Stage 6 layer (`scenarios.py`) makes the engine able to evaluate realistic network situations
+**systematically** instead of configuring every experiment by hand.
+
+## 1. Scenario Framework
+
+A scenario is a reproducible description of a network situation. `ScenarioPreset` holds:
+
+| Field | Meaning |
+|---|---|
+| `name` / `description` | human-readable scenario identity |
+| `conditions` | the exact link conditions (congestion, packet loss, bandwidth) applied to named links |
+| `failures` | the links and nodes that go down during the run, and are later recovered |
+| `workload` | the traffic workload (classes, packets per class, packet size, pps, seed) |
+| `seed`, `failure_detection_timeout` | deterministic seed and detection timeout |
+| `before_fraction`, `during_fraction` | how much of the workload runs before / during the outage |
+
+`apply_scenario(sim, scenario)` applies a preset to a live simulator (resetting the topology to its
+defaults first, so a scenario never inherits the previous one's degradation), and
+`reset_scenario(sim)` / `clear_failures(sim)` return the network to its default state.
+
+## 2. Scenario Presets
+
+| Key | Scenario | Conditions | Failures |
+|---|---|---|---|
+| `normal` | Normal network | none (topology defaults) | — |
+| `high_congestion` | High congestion | 75% congestion on all core links | — |
+| `high_packet_loss` | High packet loss | 10% loss on all core links | — |
+| `reduced_bandwidth` | Reduced bandwidth | 10 Mbps on all core links, bulk (8000 B) packets | — |
+| `link_failure` | Link failure | topology defaults | R3-R5 |
+| `router_failure` | Router (node) failure | topology defaults | node R3 |
+| `multiple_link_failures` | Multiple link failures | topology defaults | R3-R5 and R4-R5 |
+| `congestion_and_failure` | Congestion + link failure | 75% congestion | R3-R5 |
+| `loss_and_congestion` | Packet loss + congestion | 60% congestion + 12% loss | — |
+| `bandwidth_degradation_and_congestion` | Bandwidth degradation + congestion | 15 Mbps + 60% congestion | — |
+| `combined_degraded_network` | Combined degraded network | two condition groups: congestion 50% + loss 8% + 20 Mbps, and 50% congestion + 40% loss on R1-R3/R3-R5 | R3-R5 and R4-R5 |
+
+Failures are injected mid-run and recovered later, so every failure scenario produces a real
+before / during / after measurement rather than a single snapshot.
+
+## 3. Phased Scenario Execution
+
+`run_scenario(...)` drives the real `NetworkSimulator` through three phases:
+
+1. **before** — the workload runs on the scenario's conditions,
+2. **during** — the scenario's components fail, the simulation clock advances past the detection
+   timeout so the heartbeat engine *detects, recalculates and reroutes*, and more of the workload
+   is processed,
+3. **after** — the failed components recover and the remaining workload is drained.
+
+Each phase's metrics are computed by the same `Metrics` implementation used everywhere else, applied
+to that phase's packet records, so latency, throughput, loss, PDR and jitter are real per-phase
+measurements.
+
+## 4. Resilience Evaluation
+
+For one run the engine records (all measured, never estimated):
+
+- failure time, detection time and detection delay,
+- route recalculation time and recalculation delay,
+- recovery time and outage time (failure → restored),
+- packets processed during the outage ("affected"), delivered and dropped,
+- packets successfully delivered after recovery,
+- number of route changes, failed components, initial route and final route.
+
+Timing comes from the simulator's `RecoveryRecord`s (the same records Stage 2+3 uses), and the packet
+counts come from the packet records created in each phase.
+
+## 5. Route Stability
+
+Every route decision is already logged as structured events, so Stage 6 reconstructs the actual
+route history from them:
+
+- `route_history_frame(sim)` — one row per initial route and per `ROUTE_RECALCULATED` event, with the
+  previous route, the new route and the route cost.
+- `flow_route_history(sim)` — the route history of each individual flow.
+- `workload_route_timeline(sim, flow_ids)` — the workload's route over time with repeated routes
+  collapsed; the number of route changes is the length of that timeline minus one.
+
+Measured example (`link_failure`, seed 42, 50 packets):
+
+```
+Before failure : H1 → R1 → R3 → R5 → H3
+During failure : H1 → R1 → R2 → R4 → R5 → H3
+After recovery : H1 → R1 → R3 → R5 → H3
+```
+
+Detection delay 1.50 s, outage 2.14 s, 2 route changes, 100% of packets delivered.
+`multiple_link_failures` (R3-R5 **and** R4-R5 down) detours through
+`H1 → R1 → R2 → R4 → R6 → R5 → H3` and returns to the optimal route after recovery.
+
+## 6. Multi-Run Experiments
+
+`run_multi_run_experiment(scenario, seeds=[...])` executes the same scenario with several seeds and
+reports, for every metric: **mean, standard deviation, minimum and maximum** (plus the per-run
+table). The metrics covered are average latency, latency standard deviation, throughput, packet
+loss, PDR, jitter, average queue waiting time, maximum queue length, recovery time, route changes,
+successful flows, failed/dropped flows and packets affected.
+
+## 7. Sensitivity Experiment
+
+`run_sensitivity_experiment(parameter, values)` varies **one** network parameter while every other
+condition stays identical (the varied parameter is applied uniformly to all links the workload uses,
+so routing cannot escape it):
+
+| Parameter | Default sweep |
+|---|---|
+| `congestion` | 0.0 → 0.2 → 0.4 → 0.6 → 0.8 → 1.0 |
+| `packet_loss` | 0 % → 5 % → 10 % → 20 % |
+| `bandwidth` | 100 → 50 → 25 → 10 Mbps |
+
+Measured example (mean of seeds 42 and 7, 50 packets), congestion sweep:
+
+| Congestion | Avg latency (ms) | PDR (%) | Throughput (B/s) | Avg queue wait (ms) |
+|---|---|---|---|---|
+| 0.0 | 541.0 | 100.0 | 29679 | 500.6 |
+| 0.2 | 982.3 | 95.0 | 20140 | 896.8 |
+| 0.4 | 1424.3 | 88.0 | 14510 | 1293.1 |
+| 0.6 | 1846.9 | 82.0 | 11062 | 1689.3 |
+| 0.8 | 2292.3 | 79.0 | 9018 | 2085.5 |
+| 1.0 | 2759.5 | 76.0 | 7519 | 2481.8 |
+
+## 8. Scenario Comparison
+
+`compare_scenarios([...])` measures several scenarios on the **same workload and the same seed**.
+Only the scenario definition differs between rows. Measured example
+(50 packets, seed 42):
+
+| Scenario | Avg latency (ms) | PDR (%) | Loss (%) | Outage (s) | Route changes | Final route |
+|---|---|---|---|---|---|---|
+| Normal network | 541.0 | 100.0 | 0.0 | 0.00 | 0 | H1 → R1 → R3 → R5 → H3 |
+| High congestion | 2113.9 | 80.0 | 20.0 | 0.00 | 0 | H1 → R1 → R3 → R5 → H3 |
+| Link failure | 1547.0 | 100.0 | 0.0 | 2.14 | 2 | H1 → R1 → R3 → R5 → H3 |
+| Combined degraded network | 2838.9 | 40.0 | 60.0 | 3.00 | 2 | H1 → R1 → R3 → R4 → R5 → H3 |
+
+## 9. Reproducibility
+
+Same topology + same conditions + same workload + same seed + same configuration produces the same
+simulation result. This is what makes every comparison fair, and it is covered by dedicated tests:
+repeating a scenario run returns identical summary rows, phase metrics, route history, route
+timeline and per-class tables, and repeating a multi-run experiment with the same seed three times
+reports a standard deviation of exactly zero for every metric.
+
+## 10. Export
+
+Every result object exposes `frames() -> {name: DataFrame}`, and
+`export_frames(frames, directory)` / `export_result(result, directory)` write those DataFrames to CSV
+files. The Scenario Lab additionally offers CSV download buttons for the scenario summary, the route
+history, the per-run results, the sensitivity results and the scenario comparison. Exported content
+is the generated experiment data, not hand-written values.
+
+---
+
+## Dashboard Tabs (Stage 4 + 5 + 6)
 
 | Tab | Contents |
 |---|---|
@@ -320,9 +486,11 @@ both algorithms, which isolates the QoS scheduler as the variable that changes p
 | **🧪 QoS Lab** | Scheduler selection (live + experiment), traffic-class priority/WFQ weight configuration, workload and scenario selection, FIFO vs Priority vs WFQ comparison, congestion stress test, per-class latency/throughput/loss/jitter/waiting-time charts, queue statistics, per-class queue occupancy |
 | **🧭 Routing Lab** | Live algorithm selection, routing weight configuration (with presets), Dijkstra vs Bellman-Ford comparison, routing weight sensitivity experiment, route/route-cost/hop-count tables and charts, selected route drawn on the topology, per-class metrics per algorithm |
 | **🔬 Combined Lab** | Six-way routing × QoS comparison with six charts (latency, throughput, loss, PDR, jitter, route cost), route/cost/hop table, class-wise comparison across all six configurations, queue statistics per configuration |
+| **🧨 Scenario Lab** | Scenario preset selection, full scenario run with per-phase tables/charts and the resilience table, route history + route-over-time chart + final route on the topology, multi-seed repeated experiments with aggregate statistics, parameter sensitivity analysis with charts, scenario comparison, and CSV download buttons |
 
 All experiment runs use deterministic seeds and report the workload, seed and conditions alongside
-the results so each comparison is reproducible.
+the results so each comparison is reproducible. The Stage 6 UI is additive only — the existing tabs
+were not redesigned.
 
 ---
 
@@ -362,7 +530,11 @@ Open browser at displayed URL (typically http://localhost:8501).
 pytest -v
 ```
 
-Expected: 59 tests passed (14 Stage 1 + 22 Stage 2+3 + 23 Stage 4+5).
+Expected: 93 tests passed (14 Stage 1 + 22 Stage 2+3 + 23 Stage 4+5 + 34 Stage 6).
+
+```bash
+pytest test_stage6.py -v      # Stage 6 only
+```
 
 ## Demonstration Scenario (Required)
 
@@ -385,6 +557,22 @@ This workflow must work through UI:
 15. **Compare before/after**: Performance graphs show time-series, comparison table shows before/during/after metrics
 
 All steps use real simulation engine, no hardcoded routes or fake metrics.
+
+## Demonstration Scenario (Stage 6 — Scenario Lab)
+
+1. **Open the `🧨 Scenario Lab` tab**
+2. **Select a preset**: `High congestion`, `Link failure`, `Multiple link failures`, `Combined degraded network`, …
+3. **Press `▶️ Run scenario`**: the workload runs *before* the failure, the failure is injected, the
+   clock advances past the detection timeout so the engine detects and reroutes, then the network
+   recovers and the rest of the workload is drained
+4. **Observe** the per-phase table and chart, the resilience/recovery measurements, the route
+   history table, the route-over-time chart and the final route drawn on the topology
+5. **Press `🔁 Run repeated experiments`** with seeds `1, 2, 3, 4, 5` to get per-run results plus
+   mean / standard deviation / min / max for every metric
+6. **Press `📈 Run sensitivity analysis`** and switch the parameter between congestion, packet loss
+   and bandwidth to see measured performance degrade monotonically
+7. **Press `⚖️ Compare scenarios`** to measure the selected scenarios on the same workload and seed
+8. **Download** the summary, route history, per-run, sensitivity or comparison tables as CSV
 
 ## Code Quality
 
@@ -424,17 +612,20 @@ All steps use real simulation engine, no hardcoded routes or fake metrics.
 
 ```
 adaptive-self-healing-network-routing/
-├── app.py                 # Streamlit dashboard (Network & Traffic + QoS/Routing/Combined labs)
+├── app.py                 # Streamlit dashboard shell (header, tabs, shared helpers)
+├── scenario_lab.py        # Stage 6 Scenario Lab tab (new)
 ├── topology.py            # Network topology with positions
 ├── routing.py             # Dijkstra + Bellman-Ford, configurable weights, route analysis
 ├── qos.py                 # Packets, FIFO / Priority / WFQ, queue stats, class config
 ├── metrics.py             # Overall + per-class metrics, jitter, recovery tracking
 ├── events.py              # Structured event system
 ├── simulator.py           # Central simulator with self-healing (enhanced)
-├── experiments.py         # Stage 4 + 5 experiment engine (new)
+├── experiments.py         # Stage 4 + 5 experiment engine
+├── scenarios.py           # Stage 6 scenario framework + resilience/sensitivity (new)
 ├── test_simulation.py     # Stage 1 tests
 ├── test_stage2.py         # Stage 2+3 tests
-├── test_stage4_5.py       # Stage 4+5 tests (new)
+├── test_stage4_5.py       # Stage 4+5 tests
+├── test_stage6.py         # Stage 6 tests (new)
 ├── requirements.txt       # Dependencies
 └── README.md
 ```
@@ -471,6 +662,31 @@ adaptive-self-healing-network-routing/
 - [x] README updated
 - [x] No fake/hardcoded results
 
+## Definition of Done — Stage 6 Checklist
+
+- [x] Reusable scenario framework (`ScenarioPreset`, conditions + failures + workload + seed)
+- [x] Eleven named scenario presets covering normal, high congestion, high packet loss, reduced
+  bandwidth, link failure, router/node failure, multiple link failures, congestion + failure,
+  packet loss + congestion, bandwidth degradation + congestion and a combined degraded network
+- [x] Scenario presets apply real link conditions and real failures to the simulator
+- [x] Scenario reset restores topology defaults and clears failures
+- [x] Phased scenario runner: before failure / during failure / after recovery
+- [x] Multi-run experiment engine with configurable seeds
+- [x] Per scenario: avg latency, latency standard deviation, throughput, packet loss, PDR, jitter,
+  average queue waiting time, max queue length, recovery time, route changes, successful and
+  failed/dropped flows
+- [x] Resilience evaluation: failure time, detection time, route recalculation time, rerouting,
+  recovery time, packets affected, packets delivered after recovery, route changes, final route
+- [x] Route stability: actual route history per flow + route timeline of the workload
+- [x] Sensitivity experiment varying one parameter with all other conditions identical
+- [x] Scenario comparison on identical workload and seed
+- [x] Reproducibility with deterministic seeds (dedicated tests)
+- [x] CSV / DataFrame export of every result
+- [x] 34 new Stage 6 tests, all 59 Stage 1-5 tests still passing (93 total)
+- [x] Scenario Lab tab in the dashboard (additive only, existing tabs unchanged)
+- [x] No fake or hardcoded experiment metrics
+- [x] README documents Stage 6
+
 ## Known Limitations
 
 - Packet loss is determined by the link conditions of the selected route (plus a congestion
@@ -484,7 +700,18 @@ adaptive-self-healing-network-routing/
 - Positions are fixed for visualization clarity, not auto-layout
 - Continuous traffic generation creates packets at once with spaced creation times (not real-time streaming)
 - Bandwidth reduction affects serialization only, not queuing model
+- Route recalculation is driven by heartbeat detection, so packets are never routed over a link that
+  the routing engine already knows is down; a failure therefore mainly shows up as a route change
+  plus the measured detection/recalculation/outage times.
+- Route switch-back after recovery uses the engine's hysteresis rule (a recovered route is adopted
+  only when it becomes substantially cheaper), so a scenario whose alternative route is only
+  marginally worse keeps the alternative path after recovery. Scenarios that force a clearly more
+  expensive detour (for example `multiple_link_failures`) do return to the optimal route.
+- In the resilience table, "Packets Affected" means the packets processed while the scenario's
+  degraded/failure phase was active; for scenarios without failures it is simply the middle phase of
+  the workload.
 - No authentication/database/cloud (intentionally out of scope)
+- No Packet Tracer style packet animation (explicitly out of scope)
 
 ## License
 

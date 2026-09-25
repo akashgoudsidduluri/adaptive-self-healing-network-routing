@@ -266,13 +266,29 @@ def build_simulator(
     routing_weights: Optional[Dict[str, float]] = None,
     wfq_weights: Optional[Dict[str, float]] = None,
     priorities: Optional[Dict[str, float]] = None,
+    failure_detection_timeout: Optional[float] = None,
+    heartbeat_interval: Optional[float] = None,
 ) -> NetworkSimulator:
-    """Create a configured simulator (deterministic for ``spec.seed``)."""
-    sim = NetworkSimulator(
-        seed=spec.seed,
-        scheduler=normalize_scheduler_name(scheduler),
-        algorithm=normalize_algorithm(algorithm),
-    )
+    """
+    Create a configured simulator (deterministic for ``spec.seed``).
+
+    ``failure_detection_timeout`` / ``heartbeat_interval`` are only forwarded
+    when supplied, so configurations that never inject failures keep the engine
+    defaults and behave exactly as before.
+    """
+    options: Dict[str, Any] = {
+        "seed": spec.seed,
+        "scheduler": normalize_scheduler_name(scheduler),
+        "algorithm": normalize_algorithm(algorithm),
+    }
+
+    if failure_detection_timeout is not None:
+        options["failure_detection_timeout"] = float(failure_detection_timeout)
+
+    if heartbeat_interval is not None:
+        options["heartbeat_interval"] = float(heartbeat_interval)
+
+    sim = NetworkSimulator(**options)
 
     if conditions is not None:
         apply_conditions(sim, conditions)

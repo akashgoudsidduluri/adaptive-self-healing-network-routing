@@ -1,9 +1,11 @@
 """
 NetAdapt — Adaptive and Self-Healing QoS-Based Network Routing System
-Interactive Streamlit dashboard: Stage 1-3 network simulation + Stage 4/5 labs.
+Interactive Streamlit dashboard: Stage 1-3 simulation + Stage 4/5 labs +
+Stage 6 scenario laboratory.
 
 The dashboard only visualises data produced by the simulation engine
-(``simulator.py`` / ``experiments.py``). No metric is hardcoded.
+(``simulator.py`` / ``experiments.py`` / ``scenarios.py``). No metric is
+hardcoded.
 """
 
 import streamlit as st
@@ -34,6 +36,7 @@ from experiments import (
     run_routing_comparison,
     run_routing_weight_experiment,
 )
+from scenario_lab import render_scenario_lab
 
 
 st.set_page_config(
@@ -396,6 +399,18 @@ def show_class_tables(class_frames: Dict[str, pd.DataFrame], expanded: bool = Fa
             st.dataframe(frame.round(3), use_container_width=True, hide_index=True)
 
 
+def download_frame(frame: pd.DataFrame, label: str, filename: str, key: str) -> None:
+    """Offer a real DataFrame of experiment results as a CSV download."""
+    st.download_button(
+        f"⬇️ Download {label} (CSV)",
+        data=frame.to_csv(index=False).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
+        key=key,
+        use_container_width=True,
+    )
+
+
 # ------------------------------------------------------------------
 # Header
 # ------------------------------------------------------------------
@@ -458,9 +473,26 @@ st.divider()
 # ------------------------------------------------------------------
 # Tabs
 # ------------------------------------------------------------------
-tab_network, tab_qos, tab_routing, tab_combined = st.tabs(
-    ["🛰️ Network & Traffic", "🧪 QoS Lab", "🧭 Routing Lab", "🔬 Combined Lab"]
+tab_network, tab_qos, tab_routing, tab_combined, tab_scenario = st.tabs(
+    [
+        "🛰️ Network & Traffic",
+        "🧪 QoS Lab",
+        "🧭 Routing Lab",
+        "🔬 Combined Lab",
+        "🧨 Scenario Lab",
+    ]
 )
+
+# The Scenario Lab body (Stage 6) is rendered directly after the tab bar is
+# created; its implementation lives in ``scenario_lab.py``.
+with tab_scenario:
+    render_scenario_lab(
+        bar_chart=bar_chart,
+        grouped_chart=grouped_chart,
+        topology_figure=get_topology_figure,
+        workload_controls=workload_controls,
+        download_frame=download_frame,
+    )
 
 # ==================================================================
 # TAB 1 — Network & Traffic (Stage 1-3)
