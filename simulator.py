@@ -1386,8 +1386,33 @@ class NetworkSimulator:
     def ping(self, source: str, destination: str, ttl: int = 64):
         return self.protocols.ping(source, destination, ttl=ttl)
 
-    def arp_lookup(self, source: str, ip_address: str):
-        return self.protocols.arp_lookup(source, ip_address)
+    def arp_lookup(self, source: str, ip_address: str, packet_id: str | None = None):
+        return self.protocols.arp_lookup(source, ip_address, packet_id=packet_id)
+
+    # ------------------------------------------------------------------
+    # Stage 8 network diagnostics and packet inspection
+    # ------------------------------------------------------------------
+    def diagnostic_ping(self, source: str, destination: str, count: int = 4, ttl: int = 64):
+        return self.protocols.diagnostic_ping(source, destination, count=count, ttl=ttl)
+
+    def traceroute(self, source: str, destination: str, ttl: int = 64):
+        return self.protocols.traceroute(source, destination, ttl=ttl)
+
+    def arp_table(self, device_name: str):
+        return self.protocols.arp_table(device_name)
+
+    def clear_arp(self, device_name: str) -> int:
+        return self.protocols.clear_arp(device_name)
+
+    def mac_table(self, switch_name: str):
+        return self.protocols.mac_table(switch_name)
+
+    def clear_mac_table(self, switch_name: str) -> int:
+        return self.protocols.clear_mac_table(switch_name)
+
+    def diagnostic_packet_details(self, packet_id: str):
+        packet = self.protocols.protocol_packets.get(str(packet_id))
+        return self.protocols.packet_details(packet) if packet is not None else None
 
     def routing_table(self, router_name: str):
         return self.protocols.routing_table(router_name)
@@ -1422,6 +1447,8 @@ class NetworkSimulator:
         self.protocols.arp.clear()
         self.protocols.routing_tables.clear()
         self.protocols.switch_tables.clear()
+        self.protocols.protocol_packets.clear()
+        self.protocols._protocol_packet_counter = 1
 
         self._failed_links.clear()
         self._failed_nodes.clear()

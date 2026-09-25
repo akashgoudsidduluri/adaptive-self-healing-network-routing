@@ -41,6 +41,7 @@ class LabSession:
         self.running = False
         self.speed = 1.0
         self.last_packet: Optional[Dict[str, Any]] = None
+        self.diagnostic_result: Optional[Dict[str, Any]] = None
         self._counter = 1
         self.simulator: NetworkSimulator
         self.load_preset("self_healing", record=False)
@@ -135,6 +136,7 @@ class LabSession:
             if link.get("status", "UP") == "DOWN":
                 topology.fail_link(u, v)
 
+        self.diagnostic_result = None
         self.simulator = NetworkSimulator(
             topology=topology,
             seed=seed,
@@ -434,18 +436,26 @@ class LabSession:
                     event.to_dict() for event in self.simulator.event_logger.events[before:]
                     if event.details.get("packet_id") == packet.packet_id
                 ]
+                flow = next((item for item in self.simulator.active_flows.values() if packet.packet_id in item.packet_ids), None)
+                drop_reason = next((event["details"].get("reason") for event in reversed(packet_events) if event["details"].get("reason")), None)
+                if packet.delivery_status == "DROPPED" and drop_reason == "NO_ROUTE":
+                    drop_reason = "DESTINATION_UNREACHABLE"
                 self.last_packet = {
                     "id": packet.packet_id,
                     "source": packet.source,
                     "destination": packet.destination,
-                    "traffic_type": packet.traffic_type,
+                    "protocol": "IP",
+                    "traffic_class": packet.traffic_type,
                     "size": packet.size,
                     "ttl": packet.ttl,
+                    "flow_id": flow.flow_id if flow else None,
                     "route": list(packet.route),
                     "status": packet.delivery_status,
                     "latency": packet.latency,
-                    "next_hop": packet.route[1] if len(packet.route) > 1 else None,
+                    "drop_reason": drop_reason,
+                    "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
                     "current_device": packet.destination if packet.delivery_status == "DELIVERED" else packet.source,
+                    "journey": packet_events,
                     "events": packet_events,
                 }
             self._update_document()
@@ -510,6 +520,70 @@ class LabSession:
             self._update_document()
             return self.state()
 
+    def _set_diagnostic_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        self.diagnostic_result = deepcopy(result)
+        packet_results = result.get("packet_results") or result.get("packets") or []
+        if packet_results:
+            self.last_packet = deepcopy(packet_results[-1])
+        self.running = False
+        return self.state()
+
+    def run_ping(self, source: str, destination: str, count: int = 4) -> Dict[str, Any]:
+        with self.lock:
+            return self._set_diagnostic_result(
+                self.simulator.diagnostic_ping(source, destination, count=count)
+            )
+
+    def run_traceroute(self, source: str, destination: str) -> Dict[str, Any]:
+        with self.lock:
+            return self._set_diagnostic_result(
+                self.simulator.traceroute(source, destination)
+            )
+
+    def inspect_arp(self, device_name: str) -> Dict[str, Any]:
+        with self.lock:
+            entries = self.simulator.arp_table(device_name)
+            return self._set_diagnostic_result({
+                "type": "arp",
+                "title": f"ARP TABLE · {device_name}",
+                "device": device_name,
+                "entries": entries,
+            })
+
+    def clear_arp(self, device_name: str) -> Dict[str, Any]:
+        with self.lock:
+            removed = self.simulator.clear_arp(device_name)
+            return self._set_diagnostic_result({
+                "type": "arp",
+                "title": f"ARP TABLE · {device_name}",
+                "device": device_name,
+                "entries": [],
+                "cleared": removed,
+                "message": f"Cleared {removed} ARP entr{'y' if removed == 1 else 'ies'}.",
+            })
+
+    def inspect_mac(self, switch_name: str) -> Dict[str, Any]:
+        with self.lock:
+            entries = self.simulator.mac_table(switch_name)
+            return self._set_diagnostic_result({
+                "type": "mac",
+                "title": f"MAC TABLE · {switch_name}",
+                "device": switch_name,
+                "entries": entries,
+            })
+
+    def clear_mac(self, switch_name: str) -> Dict[str, Any]:
+        with self.lock:
+            removed = self.simulator.clear_mac_table(switch_name)
+            return self._set_diagnostic_result({
+                "type": "mac",
+                "title": f"MAC TABLE · {switch_name}",
+                "device": switch_name,
+                "entries": [],
+                "cleared": removed,
+                "message": f"Cleared {removed} MAC entr{'y' if removed == 1 else 'ies'}.",
+            })
+
     def console(self, device_name: str, command: str) -> Dict[str, Any]:
         with self.lock:
             device = self.simulator.topology.get_device(device_name)
@@ -561,6 +635,41 @@ class LabSession:
             self.history.append(self.export_document())
             return self.import_document(self.future.pop(), record=False)
 
+    def _packet_states(self) -> List[Dict[str, Any]]:
+        packets = [
+            self.simulator.protocols.packet_details(packet)
+            for packet in self.simulator.protocols.protocol_packets.values()
+        ]
+        for packet in self.simulator.packets[-100:]:
+            events = [
+                event.to_dict()
+                for event in self.simulator.event_logger.events
+                if event.details.get("packet_id") == packet.packet_id
+            ]
+            flow = next((item for item in self.simulator.active_flows.values() if packet.packet_id in item.packet_ids), None)
+            drop_reason = next((event["details"].get("reason") for event in reversed(events) if event["details"].get("reason")), None)
+            if packet.delivery_status == "DROPPED" and drop_reason == "NO_ROUTE":
+                drop_reason = "DESTINATION_UNREACHABLE"
+            packets.append({
+                "id": packet.packet_id,
+                "packet_id": packet.packet_id,
+                "source": packet.source,
+                "destination": packet.destination,
+                "protocol": "IP",
+                "traffic_class": packet.traffic_type,
+                "size": packet.size,
+                "ttl": packet.ttl,
+                "flow_id": flow.flow_id if flow else None,
+                "route": list(packet.route),
+                "status": packet.delivery_status,
+                "latency": packet.latency,
+                "current_device": packet.destination if packet.delivery_status == "DELIVERED" else packet.source,
+                "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
+                "drop_reason": drop_reason,
+                "journey": events,
+            })
+        return packets[-200:]
+
     def state(self) -> Dict[str, Any]:
         with self.lock:
             self._update_document()
@@ -610,6 +719,8 @@ class LabSession:
                 "links": links,
                 "flows": flows,
                 "last_packet": self.last_packet,
+                "packets": self._packet_states(),
+                "diagnostic_result": deepcopy(self.diagnostic_result),
                 "queue": {"length": queue.get("current_queue_length", 0), "max": queue.get("max_queue_length", 0), "average_wait": queue.get("average_waiting_time", 0.0)},
                 "metrics": {"sent": metrics["packets_sent"], "delivered": metrics["packets_delivered"], "dropped": metrics["packets_dropped"], "pdr": metrics["packet_delivery_ratio"], "latency": metrics["average_latency"] * 1000, "throughput": metrics["throughput"], "route_changes": sum(1 for event in self.simulator.event_logger.events if event.event_type == "ROUTE_RECALCULATED")},
                 "events": [event.to_dict() for event in self.simulator.event_logger.get_events(limit=40)],

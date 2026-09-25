@@ -49,6 +49,15 @@
 
       <main class="canvas-panel">
         <div class="canvas-header"><div><span class="eyebrow">TOPOLOGY WORKSPACE</span><h1 id="topologyName">Self-Healing Demo</h1></div><div class="canvas-actions"><button id="fitBtn">⌗ Fit</button><label class="toggle"><input id="gridToggle" type="checkbox" checked /> Grid</label><label class="toggle"><input id="snapToggle" type="checkbox" checked /> Snap</label></div></div>
+        <div class="diagnostic-toolbar">
+          <span class="diagnostic-source">Source: <b id="diagnosticSource">select a device</b></span>
+          <label>Destination <select id="diagnosticDestination"><option>select a destination</option></select></label>
+          <button id="pingBtn" data-diagnostic="ping">⌁ Ping</button>
+          <button id="tracerouteBtn" data-diagnostic="traceroute">↳ Traceroute</button>
+          <button id="arpBtn" data-diagnostic="arp">ARP Table</button>
+          <button id="macBtn" data-diagnostic="mac">MAC Table</button>
+          <button id="packetInspectorBtn" data-diagnostic="packets">Packet Inspector</button>
+        </div>
         <div class="canvas-wrap" id="canvasWrap">
           <svg id="networkCanvas" viewBox="0 0 1200 680" role="application" aria-label="Editable network topology canvas">
             <defs><pattern id="gridPattern" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" stroke="#172638" stroke-width="1" /></pattern><filter id="nodeShadow"><feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#000" flood-opacity=".45" /></filter><filter id="packetGlow"><feGaussianBlur stdDeviation="3" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>

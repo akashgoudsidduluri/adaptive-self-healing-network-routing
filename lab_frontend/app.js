@@ -12,7 +12,9 @@ let mode = 'select';
 let selected = null;
 let connectStart = null;
 let drag = null;
-let lastPacketId = null;
+let seenPacketIds = new Set();
+let diagnosticView = false;
+let packetFilter = {status:'all', protocol:'all', traffic_class:'all'};
 let playTimer = null;
 let zoom = 1;
 let origin = { x: 0, y: 0 };
@@ -64,7 +66,7 @@ function linkMarkup(link, active) {
 function routeEdges() {
   const edges=new Set();
   for (const flow of state.flows || []) for (let i=0;i<(flow.route||[]).length-1;i++) edges.add(key(flow.route[i],flow.route[i+1]));
-  if (state.last_packet?.route) for (let i=0;i<state.last_packet.route.length-1;i++) edges.add(key(state.last_packet.route[i],state.last_packet.route[i+1]));
+  for (const packet of state.packets || []) if (['ACTIVE','PENDING'].includes(packet.status) && packet.route?.length>1) for (let i=0;i<packet.route.length-1;i++) edges.add(key(packet.route[i],packet.route[i+1]));
   return edges;
 }
 function renderCanvas() {
@@ -79,8 +81,7 @@ function renderCanvas() {
       if (mode === 'delete') {
         api('delete_link', {source: el.dataset.source, target: el.dataset.target});
       } else {
-        selected = {kind: 'link', id: el.dataset.source, other: el.dataset.target};
-        renderInspector();
+        selected = {kind: 'link', id: el.dataset.source, other: el.dataset.target}; diagnosticView=false; renderInspector();
       }
     });
   });
@@ -90,8 +91,10 @@ function renderCanvas() {
   $('clock').textContent=clock(state.time);
   $('statSent').textContent=Math.round(state.metrics.sent); $('statDelivered').textContent=Math.round(state.metrics.delivered); $('statDropped').textContent=Math.round(state.metrics.dropped); $('statPdr').textContent=`${fmt(state.metrics.pdr,1)}%`; $('statLatency').textContent=`${fmt(state.metrics.latency,1)} ms`; $('statRouteChanges').textContent=state.metrics.route_changes;
   const q=state.queue||{}; $('queueLength').textContent=`${Math.round(q.length||0)} packets`; $('queueWait').textContent=`${fmt((q.average_wait||0)*1000,1)} ms average wait`; $('flowCount').textContent=`${state.flows?.length||0} active flows`; $('queueBar').style.width=`${Math.min(100,(q.length||0)*10)}%`;
-  if (state.last_packet && state.last_packet.id!==lastPacketId) animatePacket(state.last_packet);
-  lastPacketId=state.last_packet?.id || null;
+  const packets=state.packets||[];
+  if(!packets.length) seenPacketIds.clear();
+  packets.forEach(packet=>{const packetKey=String(packet.id);if(!seenPacketIds.has(packetKey)){seenPacketIds.add(packetKey);animatePacket(packet);}});
+  renderDiagnosticToolbar();
   $('undoBtn').disabled=!state.can_undo; $('redoBtn').disabled=!state.can_redo;
   $('playBtn').classList.toggle('primary',state.running);
 }
@@ -108,19 +111,62 @@ function bindNode(el) {
     if(mode==='delete') { api('delete_device',{id}); return; }
     if(mode==='connect') { if(!connectStart) {connectStart=id;toast(`Connect from ${id}`);} else if(connectStart!==id) { const from=connectStart;connectStart=null;api('add_link',{source:from,target:id}); } return; }
     if(e.button!==0) return;
-    const point=canvasPoint(e); drag={id,dx:point.x-state.devices.find(d=>d.id===id).x,dy:point.y-state.devices.find(d=>d.id===id).y,moved:false}; el.setPointerCapture?.(e.pointerId); selected={kind:'device',id}; renderInspector();
+    const point=canvasPoint(e); drag={id,dx:point.x-state.devices.find(d=>d.id===id).x,dy:point.y-state.devices.find(d=>d.id===id).y,moved:false}; el.setPointerCapture?.(e.pointerId); selected={kind:'device',id}; diagnosticView=false; renderInspector();
   });
   el.addEventListener('pointermove',(e)=>{if(!drag||drag.id!==id)return;const p=canvasPoint(e);let x=p.x-drag.dx,y=p.y-drag.dy;if($('snapToggle').checked){x=Math.round(x/16)*16;y=Math.round(y/16)*16;}drag.moved=true;el.setAttribute('transform',`translate(${x},${y})`);origin={x,y};});
   el.addEventListener('pointerup',async()=>{if(!drag||drag.id!==id)return;const d=drag;drag=null;if(d.moved) await api('move_device',{id,x:origin.x,y:origin.y}); else renderInspector();});
-  el.addEventListener('click',(e)=>{e.stopPropagation();if(mode==='select'&&!drag){selected={kind:'device',id};renderInspector();}});
+  el.addEventListener('click',(e)=>{e.stopPropagation();if(mode==='select'&&!drag){selected={kind:'device',id};diagnosticView=false;renderInspector();}});
 }
 function canvasPoint(event) { const point=canvas.createSVGPoint(); point.x=event.clientX;point.y=event.clientY; return point.matrixTransform(canvas.getScreenCTM().inverse()); }
 function animatePacket(packet) {
   const route=packet.route||[]; if(route.length<2)return; const points=route.map(id=>state.devices.find(d=>d.id===id)).filter(Boolean); if(points.length<2)return;
-  const id=`packetPath-${packet.id}-${Date.now()}`; const d=points.map((p,i)=>`${i?'L':'M'} ${p.x} ${p.y}`).join(' '); const color=packet.status==='DROPPED'?'#f16c7a':COLORS[packet.traffic_type]||'#56d9e8';
+  const id=`packetPath-${packet.id}-${Date.now()}`; const d=points.map((p,i)=>`${i?'L':'M'} ${p.x} ${p.y}`).join(' '); const trafficClass=packet.traffic_class||packet.traffic_type; const color=packet.status==='DROPPED'?'#f16c7a':COLORS[trafficClass]||'#56d9e8';
   packetLayer.insertAdjacentHTML('beforeend',`<path id="${id}" d="${d}" fill="none" stroke="none"/><g class="packet ${packet.status==='DROPPED'?'dropped':''}" data-packet="${packet.id}" style="color:${color}"><circle class="packet-ring" r="8"/><circle class="packet-core" r="3"/><text class="packet-label" y="-13">P${packet.id}</text><animateMotion dur="${Math.max(900,route.length*430)}ms" repeatCount="1" fill="freeze"><mpath href="#${id}"/></animateMotion></g>`);
-  packetLayer.querySelectorAll('[data-packet]').forEach(el=>el.addEventListener('click',()=>{selected={kind:'packet',data:packet};renderInspector();}));
+  packetLayer.querySelector(`[data-packet="${CSS.escape(String(packet.id))}"]`)?.addEventListener('click',()=>{selected={kind:'packet',data:packet};diagnosticView=false;renderInspector();});
   setTimeout(()=>{const el=document.getElementById(id);if(el)el.remove();},Math.max(1000,route.length*430)+300);
+}
+function renderDiagnosticToolbar(){
+  const source=selected?.kind==='device'?selected.id:null;
+  $('diagnosticSource').textContent=source||'select a device';
+  const select=$('diagnosticDestination');
+  const previous=select.value;
+  const destinations=(state.devices||[]).filter(device=>device.id!==source);
+  select.innerHTML=destinations.length?destinations.map(device=>`<option value="${esc(device.id)}">${esc(device.name)}</option>`).join(''):'<option>select a destination</option>';
+  if(destinations.some(device=>device.id===previous))select.value=previous;
+}
+function eventName(value){return String(value||'').split('.').pop();}
+function diagnosticResultInspector(){
+  const result=state.diagnostic_result;
+  if(!result)return '<div class="inspector-empty"><div>⌁</div><p>Select a device and run a diagnostic quick action.</p></div>';
+  if(result.type==='ping'){
+    const r=result.rtt_ms||{};
+    return `<div class="device-hero"><div class="device-symbol">⌁</div><div><b>${esc(result.title)}</b><span>${result.success?'Reachable':'Unreachable'} · real ICMP simulation</span></div></div><div class="diagnostic-stats">${[['Packets',result.packets],['Sent',result.sent],['Received',result.received],['Lost',result.lost],['Loss',`${fmt(result.loss_percent,1)}%`],['Hops',Math.max(0,(result.path?.length||0)-1)]].map(([label,value])=>`<div class="diagnostic-stat"><b>${esc(value)}</b><span>${label}</span></div>`).join('')}</div><div class="inspector-section"><div class="section-title">RTT</div>${property('Minimum',r.min==null?'—':`${fmt(r.min,2)} ms`)}${property('Average',r.average==null?'—':`${fmt(r.average,2)} ms`)}${property('Maximum',r.max==null?'—':`${fmt(r.max,2)} ms`)}</div><div class="inspector-section"><div class="section-title">Actual path</div><div class="diagnostic-path">${esc((result.path||[]).join(' → ')||'No route')}</div>${result.reason?`<div class="drop-reason">${esc(result.reason)}</div>`:''}<button data-action="open-packets">Inspect ${result.packet_results?.length||0} ping packets</button></div>`;
+  }
+  if(result.type==='traceroute'){
+    return `<div class="device-hero"><div class="device-symbol">↳</div><div><b>${esc(result.title)}</b><span>${result.hops.length} discovered hops</span></div></div><table class="diagnostic-table"><thead><tr><th>#</th><th>Device</th><th>IP</th><th>Response</th></tr></thead><tbody>${result.hops.map(hop=>`<tr><td>${hop.hop}</td><td>${esc(hop.device)}</td><td>${esc(hop.ip||'—')}</td><td>${hop.response_time_ms==null?'—':`${fmt(hop.response_time_ms,2)} ms`}</td></tr>`).join('')}</tbody></table><div class="diagnostic-path">${esc((result.path||[]).join(' → '))}</div><button data-action="open-packets">Inspect traceroute packets</button>`;
+  }
+  if(result.type==='arp'){
+    return `<div class="device-hero"><div class="device-symbol">▤</div><div><b>${esc(result.title)}</b><span>${result.entries.length} dynamic entr${result.entries.length===1?'y':'ies'}</span></div></div>${result.message?`<p class="hint">${esc(result.message)}</p>`:''}<table class="diagnostic-table"><thead><tr><th>IP Address</th><th>MAC Address</th><th>Interface</th><th>State</th></tr></thead><tbody>${result.entries.map(entry=>`<tr><td>${esc(entry.ip_address)}</td><td>${esc(entry.mac_address)}</td><td>${esc(entry.interface_id)}</td><td>${esc(entry.state)}</td></tr>`).join('')||'<tr><td colspan="4">No ARP entries learned.</td></tr>'}</tbody></table><button class="danger" data-action="clear-arp">Clear ARP</button>`;
+  }
+  if(result.type==='mac'){
+    return `<div class="device-hero"><div class="device-symbol">▥</div><div><b>${esc(result.title)}</b><span>${result.entries.length} learned entr${result.entries.length===1?'y':'ies'}</span></div></div>${result.message?`<p class="hint">${esc(result.message)}</p>`:''}<table class="diagnostic-table"><thead><tr><th>MAC Address</th><th>Interface</th><th>Type</th></tr></thead><tbody>${result.entries.map(entry=>`<tr><td>${esc(entry.mac_address)}</td><td>${esc(entry.interface_id)}</td><td>${esc(entry.type)}</td></tr>`).join('')||'<tr><td colspan="3">No MAC addresses learned.</td></tr>'}</tbody></table><button class="danger" data-action="clear-mac">Clear MAC Table</button>`;
+  }
+  return '<div class="inspector-empty"><div>⌁</div><p>No diagnostic result.</p></div>';
+}
+function packetListInspector(){
+  const packets=state.packets||[];
+  const filtered=packets.filter(packet=>{
+    const status=packetFilter.status;
+    const statusMatch=status==='all'||(status==='active'?['ACTIVE','PENDING'].includes(packet.status):packet.status===status.toUpperCase());
+    return statusMatch&&(packetFilter.protocol==='all'||packet.protocol===packetFilter.protocol)&&(packetFilter.traffic_class==='all'||(packet.traffic_class||packet.traffic_type)===packetFilter.traffic_class);
+  });
+  const statuses=['all','active','delivered','dropped'];
+  const classes=[...new Set(packets.map(packet=>packet.traffic_class||packet.traffic_type).filter(Boolean))];
+  return `<div class="device-hero"><div class="device-symbol">◎</div><div><b>Packet Inspector</b><span>${filtered.length} of ${packets.length} engine packets</span></div></div><div class="packet-filter-row"><select data-packet-filter="status">${statuses.map(value=>`<option value="${value}" ${packetFilter.status===value?'selected':''}>${value[0].toUpperCase()+value.slice(1)}</option>`).join('')}</select><select data-packet-filter="protocol"><option value="all">All protocols</option><option value="ICMP" ${packetFilter.protocol==='ICMP'?'selected':''}>ICMP</option><option value="IP" ${packetFilter.protocol==='IP'?'selected':''}>IP</option></select></div><select data-packet-filter="traffic_class" style="width:100%;margin-bottom:8px"><option value="all">All traffic classes</option>${classes.map(value=>`<option ${packetFilter.traffic_class===value?'selected':''}>${esc(value)}</option>`).join('')}</select>${filtered.map(packet=>`<div class="packet-row" data-packet-id="${esc(packet.id)}"><b>#${esc(packet.id)} · ${esc(packet.source)} → ${esc(packet.destination)}</b><span>${esc(packet.protocol)} · ${esc(packet.traffic_class||packet.traffic_type)} · ${esc(packet.status)}</span></div>`).join('')||'<p class="hint">No packets match these filters.</p>'}`;
+}
+function bindPacketList(){
+  inspectorBody.querySelectorAll('[data-packet-filter]').forEach(input=>input.addEventListener('change',()=>{packetFilter[input.dataset.packetFilter]=input.value;diagnosticView=true;renderInspector();}));
+  inspectorBody.querySelectorAll('[data-packet-id]').forEach(row=>row.addEventListener('click',()=>{const packet=(state.packets||[]).find(item=>String(item.id)===row.dataset.packetId);if(packet){selected={kind:'packet',data:packet};diagnosticView=false;renderInspector();}}));
 }
 function property(label,value,html=false){return `<div class="property"><label>${esc(label)}</label>${html?value:`<span>${esc(value)}</span>`}</div>`;}
 function deviceInspector(device) {
@@ -136,7 +182,7 @@ function routerTable(device){const rows=state.routing_tables?.[device.id]||[];re
 function switchTable(device){const rows=Object.entries(device.mac_table||{});return `<div class="inspector-section"><div class="section-title">MAC address table <span>${rows.length}</span></div>${rows.length?rows.map(([mac,port])=>`<div class="interface-card"><b>${esc(mac)}</b><div>${esc(port)}</div></div>`).join(''):'<p class="hint">No MACs learned.</p>'}</div>`;}
 function serverInfo(device){return `<div class="inspector-section"><div class="section-title">Services</div><p class="hint">No application services configured. This server can carry simulator traffic.</p></div>`;}
 function linkInspector(link){return `<div class="device-hero"><div class="device-symbol">⌁</div><div><b>${esc(link.source)} ↔ ${esc(link.target)}</b><span>Link inspector · ${esc(link.duplex)} duplex</span></div></div><div class="inspector-section"><div class="section-title">Link conditions <span class="link-state ${link.status==='UP'?'status-up':'status-down'}">${link.status}</span></div>${property('Latency (ms)',link.latency)}<input id="linkLatency" type="number" value="${link.latency}"/><br>${property('Bandwidth (Mbps)',link.bandwidth)}<input id="linkBandwidth" type="number" value="${link.bandwidth}"/><br>${property('Packet loss (%)',fmt(link.packet_loss*100,1))}<input id="linkLoss" type="number" min="0" max="100" step="1" value="${fmt(link.packet_loss*100,1)}"/><br>${property('Congestion (%)',fmt(link.congestion*100,1))}<input id="linkCongestion" type="number" min="0" max="100" step="1" value="${fmt(link.congestion*100,1)}"/><div class="button-row"><button data-action="apply-link">Apply conditions</button><button class="danger" data-action="toggle-link">${link.status==='UP'?'Fail link':'Recover link'}</button><button data-action="delete-link">Delete</button></div></div><div class="inspector-section"><div class="section-title">Interfaces</div>${property('Interface A',link.interface_a)}${property('Interface B',link.interface_b)}</div>`;}
-function packetInspector(packet){return `<div class="device-hero"><div class="device-symbol" style="color:${COLORS[packet.traffic_type]||'#56d9e8'}">●</div><div><b>Packet #${packet.id}</b><span>${esc(packet.status)} · ${esc(packet.traffic_type)}</span></div></div><div class="inspector-section">${property('Source',packet.source)}${property('Destination',packet.destination)}${property('Protocol','IP / ICMP')}${property('TTL',packet.ttl)}${property('Size',`${packet.size} bytes`)}${property('Latency',packet.latency==null?'pending':`${fmt(packet.latency*1000,2)} ms`)}${property('Next hop',packet.next_hop||'—')}${property('Route',(packet.route||[]).join(' → '))}</div><div class="inspector-section"><div class="section-title">Event history</div>${(packet.events||[]).map(e=>`<div class="timeline-item" style="grid-template-columns:58px 1fr;padding:5px 0"><span class="timeline-time">${clock(e.time)}</span><span>${esc(e.event)}</span></div>`).join('')||'<p class="hint">No packet events.</p>'}</div>`;}
+function packetInspector(packet){const trafficClass=packet.traffic_class||packet.traffic_type;const journey=packet.journey||packet.events||[];const dropReason=packet.drop_reason||packet.reason;return `<div class="device-hero"><div class="device-symbol" style="color:${COLORS[trafficClass]||'#56d9e8'}">●</div><div><b>Packet #${esc(packet.id)}</b><span>${esc(packet.status)} · ${esc(trafficClass)}</span></div></div><div class="inspector-section">${property('Source',packet.source)}${property('Destination',packet.destination)}${property('Protocol',packet.protocol||'IP')}${property('Size',`${packet.size} bytes`)}${property('TTL',packet.ttl)}${property('Traffic class',trafficClass)}${property('Current device',packet.current_device||'—')}${property('Next hop',packet.next_hop||'—')}${property('Status',packet.status)}${property('Flow ID',packet.flow_id||'diagnostic')}${property('Route',(packet.route||[]).join(' → ')||'No route')}</div>${dropReason?`<div class="drop-reason">DROP · ${esc(dropReason)}</div>`:''}<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${journey.length} events</span></div>${journey.map((event,index)=>`<div class="journey-step"><b>${index+1}. ${esc(eventName(event.event))}</b><div>${esc(event.message)}</div><span class="hint">${clock(event.time)} · ${esc(event.component||'simulator')}</span></div>`).join('')||'<p class="hint">No packet events recorded.</p>'}</div><button data-action="back-packets">Back to packet viewer</button>`;}
 function eventInspector(event){return `<div class="device-hero"><div class="device-symbol">!</div><div><b>${esc(event.event)}</b><span>${clock(event.time)} simulation time</span></div></div><div class="console-output">${esc(JSON.stringify(event,null,2))}</div>`;}
 function labSettings(){
   const routing=state.routing||{},qos=state.qos||{},weights=routing.weights||{},classes=Object.keys(qos.priorities||{});
@@ -144,7 +190,7 @@ function labSettings(){
   const classFields=classes.map(name=>`<div class="policy-row"><b>${esc(name)}</b><label>Priority<input data-priority="${esc(name)}" type="number" step="0.1" value="${qos.priorities[name]}"/></label><label>WFQ weight<input data-weight="${esc(name)}" type="number" min="0.1" step="0.1" value="${(qos.weights||{})[name]||1}"/></label></div>`).join('');
   return `<div class="device-hero"><div class="device-symbol">⚙</div><div><b>Lab policies</b><span>Live engine configuration</span></div></div><div class="inspector-section"><div class="section-title">Routing</div><label>Algorithm<select id="routingAlgorithm"><option value="dijkstra" ${routing.algorithm==='dijkstra'?'selected':''}>Dijkstra</option><option value="bellman-ford" ${routing.algorithm==='bellman-ford'?'selected':''}>Bellman–Ford</option></select></label><div class="policy-grid">${routingFields}</div><button data-action="apply-routing">Apply routing policy</button></div><div class="inspector-section"><div class="section-title">Quality of Service</div><label>Scheduler<select id="schedulerSelect"><option value="fifo" ${qos.scheduler==='fifo'?'selected':''}>FIFO</option><option value="priority" ${qos.scheduler==='priority'?'selected':''}>Priority Queue</option><option value="wfq" ${qos.scheduler==='wfq'?'selected':''}>Weighted Fair Queuing</option></select></label><div class="policy-list">${classFields}</div><button data-action="apply-qos">Apply QoS policy</button></div>`;
 }
-function renderInspector(){let html=labSettings();if(selected?.kind==='device'){const d=state.devices.find(x=>x.id===selected.id);if(d)html=deviceInspector(d);}if(selected?.kind==='link'){const l=state.links.find(x=>key(x.source,x.target)===key(selected.id,selected.other));if(l)html=linkInspector(l);}if(selected?.kind==='packet')html=packetInspector(selected.data);if(selected?.kind==='event')html=eventInspector(selected.data);inspectorBody.innerHTML=html;bindInspectorActions();}
+function renderInspector(){let html=labSettings();if(diagnosticView)html=state.packetListView?packetListInspector():diagnosticResultInspector();if(!diagnosticView&&selected?.kind==='device'){const d=state.devices.find(x=>x.id===selected.id);if(d)html=deviceInspector(d);}if(!diagnosticView&&selected?.kind==='link'){const l=state.links.find(x=>key(x.source,x.target)===key(selected.id,selected.other));if(l)html=linkInspector(l);}if(!diagnosticView&&selected?.kind==='packet')html=packetInspector(selected.data);if(!diagnosticView&&selected?.kind==='event')html=eventInspector(selected.data);inspectorBody.innerHTML=html;bindInspectorActions();if(diagnosticView&&state.packetListView)bindPacketList();}
 function bindInspectorActions() {
   inspectorBody.querySelectorAll('[data-action]').forEach((el) => {
     el.addEventListener('click', async () => {
@@ -169,6 +215,9 @@ function bindInspectorActions() {
       if (action === 'start-traffic') { await api('start_traffic', {source:selected.id, destination:$('trafficDestination').value, traffic_type:$('trafficType').value, packet_count:Number($('trafficCount').value), pps:Number($('trafficPps').value), packet_size:Number($('trafficSize').value)}); play(); }
       if (action === 'apply-routing') { const routingWeights={}; inspectorBody.querySelectorAll('[data-routing-weight]').forEach(input=>routingWeights[input.dataset.routingWeight]=Number(input.value)); await api('routing_algorithm',{algorithm:$('routingAlgorithm').value}); await api('routing_weights',{weights:routingWeights}); }
       if (action === 'apply-qos') { const priorities={},weights={}; inspectorBody.querySelectorAll('[data-priority]').forEach(input=>priorities[input.dataset.priority]=Number(input.value)); inspectorBody.querySelectorAll('[data-weight]').forEach(input=>weights[input.dataset.weight]=Number(input.value)); await api('scheduler',{scheduler:$('schedulerSelect').value}); await api('qos_config',{priorities,weights}); }
+      if (action === 'clear-arp') await api('clear_arp',{id:state.diagnostic_result.device});
+      if (action === 'clear-mac') await api('clear_mac',{id:state.diagnostic_result.device});
+      if (action === 'open-packets' || action === 'back-packets') { state.packetListView=true; diagnosticView=true; renderInspector(); }
       if (action === 'console') { selected = {kind:'console', id:selected.id}; renderConsole(); }
     });
   });
@@ -178,20 +227,21 @@ async function runConsole(){const command=$('consoleInput').value;const output=$
 function setMode(next){mode=next;connectStart=null;document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));toast(`${next[0].toUpperCase()+next.slice(1)} tool active`);}
 document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
 document.querySelectorAll('[data-menu]').forEach(button=>button.addEventListener('click',()=>{const action=button.dataset.menu;if(action==='file'){$('newBtn').click();}else if(action==='simulation'){$('playBtn').click();}else if(action==='view'){$('fitBtn').click();$('gridToggle').checked=!$('gridToggle').checked;renderCanvas();}else{toast('Build a topology, connect devices, start traffic, then inject faults to observe self-healing.');}}));
+document.querySelectorAll('[data-diagnostic]').forEach(button=>button.addEventListener('click',async()=>{const action=button.dataset.diagnostic;if(action==='packets'){state.packetListView=true;diagnosticView=true;renderInspector();return;}const source=selected?.kind==='device'?selected.id:null;if(!source){toast('Select a source device first.',true);return;}const destination=$('diagnosticDestination').value;try{if(action==='ping'||action==='traceroute'){if(!destination||!state.devices.some(device=>device.id===destination))throw new Error('Select a destination device.');await api(action,{source,destination,count:4});}else{await api(action==='arp'?'arp_table':'mac_table',{id:source});}state.packetListView=false;diagnosticView=true;renderInspector();}catch(error){}}));
 document.querySelectorAll('.palette-item').forEach(item=>item.addEventListener('dragstart',e=>e.dataTransfer.setData('text/plain',item.dataset.type)));
 canvas.addEventListener('dragover',e=>e.preventDefault());canvas.addEventListener('drop',e=>{e.preventDefault();const type=e.dataTransfer.getData('text/plain');if(type) {const p=canvasPoint(e);api('add_device',{type,x:p.x,y:p.y});}});
-canvas.addEventListener('click',e=>{if(e.target===canvas||e.target.id==='gridRect'||e.target.id==='connectPreview'){selected=null;connectStart=null;connectPreview.setAttribute('d','');renderInspector();}});
+canvas.addEventListener('click',e=>{if(e.target===canvas||e.target.id==='gridRect'||e.target.id==='connectPreview'){selected=null;diagnosticView=false;connectStart=null;connectPreview.setAttribute('d','');renderInspector();}});
 canvas.addEventListener('pointermove',e=>{if(connectStart&&state){const from=state.devices.find(d=>d.id===connectStart),p=canvasPoint(e);if(from)connectPreview.setAttribute('d',`M ${from.x} ${from.y} L ${p.x} ${p.y}`);}});
 canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.65,Math.min(1.5,zoom+(e.deltaY<0?.05:-.05)));canvas.style.transform=`scale(${zoom})`;},{passive:false});
 $('gridToggle').addEventListener('change',renderCanvas);$('snapToggle').addEventListener('change',()=>{});
-$('clearSelection').addEventListener('click',()=>{selected=null;renderInspector();});
-$('newBtn').addEventListener('click',()=>{if(confirm('Start a new blank network?'))api('new').then(()=>{selected=null;connectStart=null;renderInspector();});});
-$('presetSelect').addEventListener('change',e=>api('load_preset',{preset:e.target.value}).then(()=>{selected=null;connectStart=null;renderInspector();}));
+$('clearSelection').addEventListener('click',()=>{selected=null;diagnosticView=false;renderInspector();});
+$('newBtn').addEventListener('click',()=>{if(confirm('Start a new blank network?'))api('new').then(()=>{selected=null;diagnosticView=false;state.packetListView=false;connectStart=null;renderInspector();});});
+$('presetSelect').addEventListener('change',e=>api('load_preset',{preset:e.target.value}).then(()=>{selected=null;diagnosticView=false;state.packetListView=false;connectStart=null;renderInspector();}));
 $('saveBtn').addEventListener('click',async()=>{const data=await api('export');const blob=new Blob([JSON.stringify(data.state.document,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='netadapt-lab.json';a.click();URL.revokeObjectURL(a.href);toast('Topology saved');});
 $('openBtn').addEventListener('click',()=>$('fileInput').click());$('fileInput').addEventListener('change',async e=>{const file=e.target.files[0];if(file)api('import',{document:JSON.parse(await file.text())});e.target.value='';});
 $('undoBtn').addEventListener('click',()=>api('undo'));$('redoBtn').addEventListener('click',()=>api('redo'));
 $('playBtn').addEventListener('click',async()=>{await api('running',{value:true});play();});$('pauseBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stopBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stepBtn').addEventListener('click',()=>api('step'));$('resetBtn').addEventListener('click',()=>{stop();api('reset');});$('speedSelect').addEventListener('change',e=>api('speed',{value:Number(e.target.value)}));
 $('fitBtn').addEventListener('click',()=>{if(!state.devices.length)return;const xs=state.devices.map(d=>d.x),ys=state.devices.map(d=>d.y),minX=Math.min(...xs)-100,maxX=Math.max(...xs)+100,minY=Math.min(...ys)-100,maxY=Math.max(...ys)+100;canvas.setAttribute('viewBox',`${minX} ${minY} ${maxX-minX} ${maxY-minY}`);});
 async function play(){stop();playTimer=setInterval(async()=>{if(!state?.running){stop();return;}try{await api('step');}catch(e){stop();}},Math.max(120,600/(state?.speed||1)));}function stop(){if(playTimer)clearInterval(playTimer);playTimer=null;}
-document.addEventListener('keydown',e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected?.kind==='device'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();api('delete_device',{id:selected.id});}if(e.key==='Escape'){selected=null;connectStart=null;renderInspector();}});
+document.addEventListener('keydown',e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected?.kind==='device'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();api('delete_device',{id:selected.id});}if(e.key==='Escape'){selected=null;diagnosticView=false;connectStart=null;renderInspector();}});
 loadState().catch(e=>toast(e.message,true));

@@ -1,4 +1,4 @@
-"""Educational ARP, ICMP, forwarding, and switching for Stage 7.
+"""Educational ARP, ICMP, diagnostics, forwarding, and switching.
 
 Every result is derived from the live topology, adaptive route, device
 interfaces, event logger, and simulation clock.  The protocol layer is
@@ -8,6 +8,7 @@ stack.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 import ipaddress
 from typing import Any, Dict, List, Optional
@@ -79,8 +80,11 @@ class ARPCache:
                 removed += 1
         return removed
 
-    def clear(self) -> None:
-        self._entries.clear()
+    def clear(self, source: Optional[str] = None) -> None:
+        if source is None:
+            self._entries.clear()
+        else:
+            self._entries.pop(str(source), None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -100,18 +104,38 @@ class ProtocolPacket:
     delivered: bool = False
     dropped: bool = False
     reason: Optional[str] = None
+    packet_id: Optional[str] = None
+    protocol: str = "ICMP"
+    traffic_class: str = "ICMP"
+    size: int = 84
+    flow_id: Optional[str] = None
+    current_device: Optional[str] = None
+    next_hop: Optional[str] = None
+    status: str = "ACTIVE"
+    created_at: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "id": self.packet_id,
+            "packet_id": self.packet_id,
             "source": self.source,
             "destination": self.destination,
             "packet_type": self.packet_type,
+            "protocol": self.protocol,
+            "traffic_class": self.traffic_class,
+            "size": self.size,
             "ttl": self.ttl,
             "route": list(self.route),
             "hops": list(self.hops),
+            "flow_id": self.flow_id,
+            "current_device": self.current_device,
+            "next_hop": self.next_hop,
+            "status": self.status,
+            "created_at": self.created_at,
             "delivered": self.delivered,
             "dropped": self.dropped,
             "reason": self.reason,
+            "drop_reason": self.reason if self.dropped else None,
         }
 
 
@@ -176,6 +200,8 @@ class ProtocolStack:
         self.arp = ARPCache(arp_lifetime)
         self.routing_tables: Dict[str, RoutingTable] = {}
         self.switch_tables: Dict[str, Dict[str, str]] = {}
+        self.protocol_packets: Dict[str, ProtocolPacket] = {}
+        self._protocol_packet_counter = 1
 
     @property
     def now(self) -> float:
@@ -207,23 +233,23 @@ class ProtocolStack:
                     return device
         return None
 
-    def arp_lookup(self, source: str, ip_address: str) -> Optional[ARPEntry]:
+    def arp_lookup(self, source: str, ip_address: str, packet_id: Optional[str] = None) -> Optional[ARPEntry]:
         """Perform a real request/reply exchange and return the source cache entry."""
 
         source_device = self._device(source)
         if source_device.status != "UP":
-            self._log(EventType.ARP_REQUEST, f"ARP request unavailable: {source} is down", source, target_ip=ip_address, success=False)
+            self._log(EventType.ARP_REQUEST, f"ARP request unavailable: {source} is down", source, target_ip=ip_address, success=False, packet_id=packet_id)
             return None
         target = str(validate_ipv4(ip_address))
-        self._log(EventType.ARP_REQUEST, f"Who has {target}? Tell {source}", source, target_ip=target, sender_mac=source_device.interfaces[0].mac_address)
+        self._log(EventType.ARP_REQUEST, f"Who has {target}? Tell {source}", source, target_ip=target, sender_mac=source_device.interfaces[0].mac_address, packet_id=packet_id)
         cached = self.arp.lookup(target, source=source, now=self.now)
         if cached is not None:
-            self._log(EventType.ARP_CACHE_UPDATE, f"ARP cache hit for {target}", source, target_ip=target, mac_address=cached.mac_address, interface_id=cached.interface_id, cache_hit=True)
+            self._log(EventType.ARP_CACHE_UPDATE, f"ARP cache hit for {target}", source, target_ip=target, mac_address=cached.mac_address, interface_id=cached.interface_id, cache_hit=True, packet_id=packet_id)
             return cached
 
         owner = self._find_device_by_ip(target)
         if owner is None or owner.status != "UP":
-            self._log(EventType.ARP_MISS, f"No ARP reply for {target}", source, target_ip=target)
+            self._log(EventType.ARP_MISS, f"No ARP reply for {target}", source, target_ip=target, packet_id=packet_id)
             return None
         owner_interface = owner.get_interface()
         entry = self.arp.insert(
@@ -233,8 +259,8 @@ class ProtocolStack:
             source_device.interface_for_link(f"{source}-{owner.name}").interface_id,
             now=self.now,
         )
-        self._log(EventType.ARP_REPLY, f"{owner.name} replied to ARP for {target}", source, target_ip=target, mac_address=entry.mac_address, reply_from=owner.name)
-        self._log(EventType.ARP_CACHE_UPDATE, f"ARP cache updated for {target}", source, target_ip=target, mac_address=entry.mac_address, interface_id=entry.interface_id, cache_hit=False)
+        self._log(EventType.ARP_REPLY, f"{owner.name} replied to ARP for {target}", source, target_ip=target, mac_address=entry.mac_address, reply_from=owner.name, packet_id=packet_id)
+        self._log(EventType.ARP_CACHE_UPDATE, f"ARP cache updated for {target}", source, target_ip=target, mac_address=entry.mac_address, interface_id=entry.interface_id, cache_hit=False, packet_id=packet_id)
         return entry
 
     # Public aliases used by diagnostic callers.
@@ -284,6 +310,95 @@ class ProtocolStack:
         table = self.routing_table(router_name)
         return table.lookup(destination_ip)
 
+    def _new_packet(self, source: str, destination: str, flow_id: str) -> ProtocolPacket:
+        packet_id = f"ICMP-{self._protocol_packet_counter}"
+        self._protocol_packet_counter += 1
+        packet = ProtocolPacket(
+            source=source,
+            destination=destination,
+            packet_id=packet_id,
+            flow_id=flow_id,
+            current_device=source,
+            created_at=self.now,
+        )
+        self.protocol_packets[packet_id] = packet
+        self._log(
+            EventType.PACKET_GENERATED,
+            f"Diagnostic packet {packet_id} created at {source}",
+            source,
+            packet_id=packet_id,
+            flow_id=flow_id,
+            protocol=packet.protocol,
+            traffic_class=packet.traffic_class,
+        )
+        return packet
+
+    def packet_details(self, packet: ProtocolPacket) -> Dict[str, Any]:
+        data = packet.to_dict()
+        journey = []
+        for event in self.simulator.event_logger.events:
+            if event.details.get("packet_id") != packet.packet_id:
+                continue
+            journey.append({
+                "time": event.timestamp,
+                "event": getattr(event.event_type, "value", str(event.event_type)),
+                "component": event.component,
+                "message": event.message,
+                "details": deepcopy(event.details),
+            })
+        data["journey"] = journey
+        return data
+
+    def arp_table(self, device_name: str) -> List[Dict[str, Any]]:
+        self._device(device_name)
+        self.arp.expire(self.now)
+        raw = self.arp.to_dict().get(device_name, {})
+        return [
+            {
+                **entry,
+                "state": "REACHABLE" if float(entry["expires_at"]) >= self.now else "STALE",
+                "learned_dynamically": True,
+            }
+            for _, entry in sorted(raw.items())
+        ]
+
+    def clear_arp(self, device_name: str) -> int:
+        self._device(device_name)
+        count = len(self.arp.to_dict().get(device_name, {}))
+        self.arp.clear(device_name)
+        self._log(
+            EventType.ARP_CLEARED,
+            f"ARP cache cleared on {device_name}",
+            device_name,
+            entries_removed=count,
+        )
+        return count
+
+    def mac_table(self, switch_name: str) -> List[Dict[str, Any]]:
+        switch = self._device(switch_name)
+        if not switch.is_switch:
+            raise ValueError(f"{switch_name} is not a switch")
+        self.switch_tables[switch_name] = dict(switch.mac_table)
+        return [
+            {"mac_address": mac, "interface_id": interface_id, "type": "DYNAMIC"}
+            for mac, interface_id in sorted(switch.mac_table.items())
+        ]
+
+    def clear_mac_table(self, switch_name: str) -> int:
+        switch = self._device(switch_name)
+        if not switch.is_switch:
+            raise ValueError(f"{switch_name} is not a switch")
+        count = len(switch.mac_table)
+        switch.mac_table.clear()
+        self.switch_tables[switch_name] = {}
+        self._log(
+            EventType.MAC_TABLE_CLEARED,
+            f"MAC table cleared on {switch_name}",
+            switch_name,
+            entries_removed=count,
+        )
+        return count
+
     def forward_packet(
         self,
         packet: ProtocolPacket,
@@ -305,7 +420,10 @@ class ProtocolStack:
         if int(packet.ttl) < 1:
             packet.dropped = True
             packet.reason = "TTL_EXCEEDED"
-            self._log(EventType.ICMP_TTL_EXCEEDED, f"TTL exceeded before forwarding {packet.source}→{packet.destination}", packet.source, ttl=packet.ttl)
+            packet.status = "DROPPED"
+            packet.current_device = packet.source
+            packet.next_hop = None
+            self._log(EventType.ICMP_TTL_EXCEEDED, f"TTL exceeded before forwarding {packet.source}→{packet.destination}", packet.source, ttl=packet.ttl, packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
             return packet
         if route is not None:
             packet.route = list(route)
@@ -315,36 +433,56 @@ class ProtocolStack:
             if not packet.route:
                 packet.dropped = True
                 packet.reason = "DESTINATION_UNREACHABLE"
-                self._log(EventType.DESTINATION_UNREACHABLE, f"Destination {packet.destination} unreachable", packet.destination, source=packet.source)
+                packet.status = "DROPPED"
+                packet.current_device = packet.source
+                self._log(EventType.DESTINATION_UNREACHABLE, f"Destination {packet.destination} unreachable", packet.destination, source=packet.source, packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
                 return packet
         if packet.route[0] != packet.source or packet.route[-1] != packet.destination:
             packet.dropped = True
             packet.reason = "INVALID_ROUTE"
+            packet.status = "DROPPED"
+            packet.current_device = packet.source
+            self._log(EventType.PACKET_DROPPED, f"Invalid route for {packet.source}→{packet.destination}", f"{packet.source}→{packet.destination}", packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
             return packet
 
         for current, next_hop in zip(packet.route, packet.route[1:]):
             if not self.simulator.topology.active_node(current) or not self.simulator.topology.active_node(next_hop):
                 packet.dropped = True
                 packet.reason = "NODE_DOWN"
-                self._log(EventType.DESTINATION_UNREACHABLE, f"Packet dropped: {current} or {next_hop} is down", current, source=packet.source, destination=packet.destination)
+                packet.current_device = current
+                packet.next_hop = next_hop
+                packet.status = "DROPPED"
+                self._log(EventType.DESTINATION_UNREACHABLE, f"Packet dropped: {current} or {next_hop} is down", current, source=packet.source, destination=packet.destination, packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
                 break
             if not self.simulator.topology.active_link(current, next_hop):
                 packet.dropped = True
                 packet.reason = "LINK_DOWN"
-                self._log(EventType.DESTINATION_UNREACHABLE, f"Packet dropped: link {current}-{next_hop} is down", f"{current}-{next_hop}", source=packet.source, destination=packet.destination)
+                packet.current_device = current
+                packet.next_hop = next_hop
+                packet.status = "DROPPED"
+                self._log(EventType.DESTINATION_UNREACHABLE, f"Packet dropped: link {current}-{next_hop} is down", f"{current}-{next_hop}", source=packet.source, destination=packet.destination, packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
                 break
             if current != packet.source:
                 if packet.ttl <= 1:
                     packet.ttl = 0
                     packet.dropped = True
                     packet.reason = "TTL_EXCEEDED"
-                    self._log(EventType.ICMP_TTL_EXCEEDED, f"TTL exceeded at {current}", current, source=packet.source, destination=packet.destination, ttl=packet.ttl)
+                    packet.current_device = current
+                    packet.next_hop = next_hop
+                    packet.status = "DROPPED"
+                    self._log(EventType.ICMP_TTL_EXCEEDED, f"TTL exceeded at {current}", current, source=packet.source, destination=packet.destination, ttl=packet.ttl, packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
                     break
                 packet.ttl -= 1
             packet.hops.append(next_hop)
-            self._log(EventType.PACKET_FORWARDED, f"Forwarded {packet.packet_type} {current}→{next_hop}", f"{current}→{next_hop}", source=packet.source, destination=packet.destination, ttl=packet.ttl, next_hop=next_hop)
+            packet.current_device = current
+            packet.next_hop = next_hop
+            self._log(EventType.PACKET_FORWARDED, f"Forwarded {packet.packet_type} {current}→{next_hop}", f"{current}→{next_hop}", source=packet.source, destination=packet.destination, ttl=packet.ttl, next_hop=next_hop, packet_id=packet.packet_id, flow_id=packet.flow_id, protocol=packet.protocol, traffic_class=packet.traffic_class)
             if packet.hops[-1] == packet.destination:
                 packet.delivered = True
+                packet.status = "DELIVERED"
+                packet.current_device = packet.destination
+                packet.next_hop = None
+                self._log(EventType.PACKET_DELIVERED, f"Diagnostic packet {packet.packet_id} delivered at {packet.destination}", packet.destination, source=packet.source, destination=packet.destination, packet_id=packet.packet_id, flow_id=packet.flow_id, route=packet.route)
                 break
         return packet
 
@@ -381,6 +519,165 @@ class ProtocolStack:
             return PingResult(source, destination, False, 0.0, len(packet.hops), route, packet.ttl, arp_resolutions, packet_loss, packet.reason)
         self._log(EventType.ICMP_ECHO_REPLY, f"Ping reply {destination}→{source}", f"{destination}→{source}", source=source, destination=destination, hops=len(packet.hops), rtt=self._route_rtt(route))
         return PingResult(source, destination, True, self._route_rtt(route), len(packet.hops), route, packet.ttl, arp_resolutions, packet_loss, None)
+
+    def diagnostic_ping(self, source: str, destination: str, count: int = 4, ttl: int = 64) -> Dict[str, Any]:
+        """Run a real multi-packet ICMP exchange and return measured results."""
+        source = str(source)
+        destination = str(destination)
+        count = int(count)
+        if count < 1:
+            raise ValueError("Ping packet count must be positive")
+        self._device(source)
+        self._device(destination)
+        sent = received = lost = 0
+        rtts: List[float] = []
+        packets: List[Dict[str, Any]] = []
+        actual_route: List[str] = []
+        failure_reason: Optional[str] = None
+
+        for attempt in range(1, count + 1):
+            packet = self._new_packet(source, destination, f"ping-{self.now:.4f}-{attempt}")
+            self._log(
+                EventType.ICMP_ECHO_REQUEST,
+                f"PING {source} → {destination} ({attempt}/{count})",
+                f"{source}→{destination}",
+                source=source,
+                destination=destination,
+                ttl=int(ttl),
+                route=[],
+                packet_id=packet.packet_id,
+                flow_id=packet.flow_id,
+            )
+            sent += 1
+            inspection = self.route_inspection(source, destination)
+            route = list(inspection["route"])
+            if route:
+                actual_route = route
+                packet.route = route
+            else:
+                packet.dropped = True
+                packet.reason = "DESTINATION_UNREACHABLE"
+                packet.status = "DROPPED"
+                failure_reason = packet.reason
+                self._log(EventType.PACKET_DROPPED, f"Diagnostic packet {packet.packet_id} dropped: no route", f"{source}→{destination}", packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
+                lost += 1
+                packets.append(self.packet_details(packet))
+                continue
+
+            arp_failed = False
+            for current, next_hop in zip(route, route[1:]):
+                next_device = self.simulator.topology.get_device(next_hop)
+                next_ip = next_device.interfaces[0].ip_address if next_device and next_device.interfaces else None
+                if not next_ip or self.arp_lookup(current, next_ip, packet.packet_id) is None:
+                    packet.dropped = True
+                    packet.reason = "ARP_RESOLUTION_FAILED"
+                    packet.status = "DROPPED"
+                    failure_reason = packet.reason
+                    arp_failed = True
+                    break
+            if arp_failed:
+                self._log(EventType.PACKET_DROPPED, f"Diagnostic packet {packet.packet_id} dropped: ARP resolution failed", f"{source}→{destination}", packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason)
+                lost += 1
+                packets.append(self.packet_details(packet))
+                continue
+
+            loss_probability = self._route_loss(route)
+            if self.simulator.rng.random() < loss_probability:
+                packet.dropped = True
+                packet.reason = "PACKET_LOSS"
+                packet.status = "DROPPED"
+                packet.current_device = source
+                failure_reason = packet.reason
+                lost += 1
+                self._log(EventType.PACKET_DROPPED, f"Diagnostic packet {packet.packet_id} dropped by configured link loss", f"{source}→{destination}", packet_id=packet.packet_id, flow_id=packet.flow_id, reason=packet.reason, packet_loss=loss_probability)
+            else:
+                self.forward_packet(packet, route=route, ttl=ttl)
+                if packet.delivered:
+                    rtt = self._route_rtt(route)
+                    rtts.append(rtt)
+                    received += 1
+                    self._log(EventType.ICMP_ECHO_REPLY, f"Reply {destination} → {source} in {rtt * 1000:.2f} ms", f"{destination}→{source}", source=source, destination=destination, rtt=rtt, packet_id=packet.packet_id, flow_id=packet.flow_id)
+                else:
+                    lost += 1
+                    failure_reason = packet.reason
+            packets.append(self.packet_details(packet))
+
+        return {
+            "type": "ping",
+            "title": f"PING {source} → {destination}",
+            "source": source,
+            "destination": destination,
+            "packets": count,
+            "sent": sent,
+            "received": received,
+            "lost": lost,
+            "loss_percent": (lost / sent * 100.0) if sent else 0.0,
+            "rtt_ms": {
+                "min": min(rtts) * 1000.0 if rtts else None,
+                "average": (sum(rtts) / len(rtts)) * 1000.0 if rtts else None,
+                "max": max(rtts) * 1000.0 if rtts else None,
+            },
+            "path": actual_route,
+            "success": received > 0,
+            "reason": failure_reason,
+            "packet_results": packets,
+        }
+
+    def traceroute(self, source: str, destination: str, ttl: int = 64) -> Dict[str, Any]:
+        """Probe each route hop with real TTL-limited forwarding."""
+        self._device(source)
+        self._device(destination)
+        inspection = self.route_inspection(source, destination)
+        route = list(inspection["route"])
+        if not route:
+            return {
+                "type": "traceroute",
+                "title": f"TRACEROUTE {source} → {destination}",
+                "source": source,
+                "destination": destination,
+                "path": [],
+                "hops": [],
+                "success": False,
+                "reason": "DESTINATION_UNREACHABLE",
+                "packets": [],
+            }
+
+        hops: List[Dict[str, Any]] = []
+        packets: List[Dict[str, Any]] = []
+        for index, hop in enumerate(route[1:], start=1):
+            packet = self._new_packet(source, destination, f"traceroute-{self.now:.4f}-{index}")
+            packet.route = list(route)
+            packet.ttl = index
+            self._log(EventType.ICMP_ECHO_REQUEST, f"TRACEROUTE probe {index} from {source}", f"{source}→{destination}", source=source, destination=destination, ttl=index, packet_id=packet.packet_id, flow_id=packet.flow_id, route=route)
+            for current, next_hop in zip(route[:index], route[1:index + 1]):
+                next_device = self.simulator.topology.get_device(next_hop)
+                next_ip = next_device.interfaces[0].ip_address if next_device and next_device.interfaces else None
+                if next_ip:
+                    self.arp_lookup(current, next_ip, packet.packet_id)
+            self.forward_packet(packet, route=route, ttl=index)
+            hop_device = self.simulator.topology.get_device(hop)
+            hop_ip = hop_device.interfaces[0].ip_address if hop_device and hop_device.interfaces else None
+            responded = hop in packet.hops
+            hops.append({
+                "hop": index,
+                "device": hop,
+                "ip": hop_ip,
+                "response_time_ms": self._route_rtt(route[:index + 1]) * 1000.0 if responded else None,
+                "status": "REPLIED" if responded else "NO_REPLY",
+            })
+            packets.append(self.packet_details(packet))
+
+        return {
+            "type": "traceroute",
+            "title": f"TRACEROUTE {source} → {destination}",
+            "source": source,
+            "destination": destination,
+            "path": route,
+            "hops": hops,
+            "success": len(hops) == max(0, len(route) - 1) and all(hop["status"] == "REPLIED" for hop in hops),
+            "reason": None,
+            "packets": packets,
+        }
 
     def _route_loss(self, route: List[str]) -> float:
         no_loss = 1.0

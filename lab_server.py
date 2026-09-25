@@ -135,6 +135,24 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.undo()
             elif action == "redo":
                 result = SESSION.redo()
+            elif action == "ping":
+                result = SESSION.run_ping(
+                    str(payload["source"]),
+                    str(payload["destination"]),
+                    int(payload.get("count", 4)),
+                )
+            elif action == "traceroute":
+                result = SESSION.run_traceroute(
+                    str(payload["source"]), str(payload["destination"])
+                )
+            elif action == "arp_table":
+                result = SESSION.inspect_arp(str(payload["id"]))
+            elif action == "clear_arp":
+                result = SESSION.clear_arp(str(payload["id"]))
+            elif action == "mac_table":
+                result = SESSION.inspect_mac(str(payload["id"]))
+            elif action == "clear_mac":
+                result = SESSION.clear_mac(str(payload["id"]))
             elif action == "console":
                 result = SESSION.console(str(payload["id"]), str(payload["command"]))
             else:

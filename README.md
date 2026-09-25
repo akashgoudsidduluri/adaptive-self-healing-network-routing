@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-132%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-143%20Passed-success)
 
 ## Overview
 
@@ -770,10 +770,25 @@ Device/interface failure integration is available through
 through the existing heartbeat/self-healing path, so adaptive routing and
 rerouting continue to work with the new infrastructure model.
 
-Stage 7 adds 20 focused tests in `test_stage7.py`. The editable laboratory adds
-14 integration tests in `test_lab.py`. The complete repository suite is 132
-passing tests: the existing engine, Stage 6 scenario framework, workspace
-regression tests, Stage 7 protocol tests, and live topology-editor backend tests.
+## Stage 8 — Network Diagnostics and Packet Inspection
+
+Stage 8 adds a compact diagnostic toolbar to the existing network laboratory.
+It does not introduce TCP, UDP, DNS, HTTP, or another dashboard. Every result
+comes from the live Python routing, protocol, event, and cache state:
+
+- four-packet ICMP ping with measured loss and min/average/max RTT;
+- hop-by-hop traceroute using TTL-limited forwarding;
+- per-device ARP inspection and real cache clearing;
+- per-switch dynamic MAC table inspection and real table clearing;
+- packet fields, EventLogger-backed packet journeys, and simulator drop reasons;
+- packet filters for status, protocol, and traffic class.
+
+Failed-link and configured packet-loss behavior remains attached to the same
+adaptive routing and self-healing engine used by the rest of NetAdapt.
+
+Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 focused
+tests in `test_stage8.py`; and the editable laboratory adds 14 integration
+tests in `test_lab.py`. The complete repository suite is 143 passing tests.
 
 
 ```
@@ -803,6 +818,7 @@ adaptive-self-healing-network-routing/
 ├── test_stage4_5.py       # Stage 4+5 tests
 ├── test_stage6.py         # Stage 6 tests
 ├── test_stage7.py         # Stage 7 infrastructure/protocol tests
+├── test_stage8.py         # Stage 8 diagnostics and packet inspection tests
 ├── test_workspace.py      # Interactive workspace regression tests
 ├── test_lab.py            # Editable lab backend integration tests
 ├── requirements.txt       # Dependencies
