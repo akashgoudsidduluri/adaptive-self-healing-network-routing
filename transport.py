@@ -648,7 +648,10 @@ class TransportLayer:
             raise ValueError(
                 "TCP connection must be ESTABLISHED before sending a response"
             )
-        sequence = connection.next_sequence
+        # Response segments keep their own sequence counter so they never punch
+        # a hole in the client's contiguous sequence space (which would stall
+        # cumulative acknowledgement of later requests).
+        sequence = connection.response_packets_sent
         packet = TransportPacket(
             "TCP",
             connection.destination,
@@ -665,7 +668,6 @@ class TransportLayer:
             connection.traffic_class,
         )
         connection.packets.append(packet)
-        connection.next_sequence += 1
         connection.response_packets_sent += 1
         connection.bytes_sent += packet.payload_size
         sent = self._enqueue(packet)

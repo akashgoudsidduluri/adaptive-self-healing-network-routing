@@ -1647,9 +1647,28 @@ class ServiceSecurityLayer:
         request_info: Dict[str, Any],
         response_info: Dict[str, Any],
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        request = self.simulator.send_tcp_data(
+        sent = self.simulator.send_tcp_data(
             connection.flow_id, 1, max(1, int(request_size))
-        )[0]
+        )
+        if not sent:
+            empty = {
+                "packet_id": None,
+                "network_packet_id": None,
+                "protocol": "TCP",
+                "source": connection.source,
+                "destination": connection.destination,
+                "source_port": connection.source_port,
+                "destination_port": connection.destination_port,
+                "traffic_class": connection.traffic_class,
+                "status": "DROPPED",
+                "delivered": False,
+                "route": list(connection.route),
+                "latency": None,
+                "drop_reason": "WINDOW_EXHAUSTED",
+                "service": dict(request_info),
+            }
+            return empty, dict(empty)
+        request = sent[0]
         self._annotate(request, request_info)
         self._pump()
         request_record = self._exchange(request)
@@ -1793,10 +1812,7 @@ class ServiceSecurityLayer:
             )
         latency = (request["latency"] or 0.0) + (response["latency"] or 0.0)
         self.service_metrics.record_latency("HTTP", latency)
-        self.service_metrics.increment("HTTP", "bytes", (request["latency"] is not None) * 0)
-        self.service_metrics.increment(
-            "HTTP", "bytes_transferred", request["network_packet_id"] and 320
-        )
+        self.service_metrics.increment("HTTP", "bytes_transferred", 960)
         if 200 <= status < 300:
             self.service_metrics.increment("HTTP", "successful")
         else:
@@ -2403,13 +2419,9 @@ class ServiceSecurityLayer:
                 self.security_metrics.increment("port_blocks")
             elif reason == DROP_ACL:
                 self.security_metrics.increment("acl_blocks")
-            elif reason == DROP_FLOOD:
-                self.security_metrics.increment("attack_packets_dropped")
             else:
                 self.security_metrics.increment("firewall_blocks")
-            if decision.get("flood") is not None or (
-                getattr(packet, "attack", None) and reason == DROP_FLOOD
-            ):
+            if reason == DROP_FLOOD:
                 self.security_metrics.increment("attack_packets_dropped")
 
     # -- firewall / ACL control ---------------------------------------
@@ -2544,7 +2556,7 @@ class ServiceSecurityLayer:
                     device, ip_address, known_mac, interface.interface_id, now=self.now
                 )
                 conflict["action"] = "LEGITIMATE_BINDING_RESTORED"
-        return {"conflict": True, "entry": entry.to_dict(), "conflict": conflict}
+        return {"conflict": True, "entry": entry.to_dict(), "details": conflict}
 
     def arp_spoof(
         self,
@@ -2558,9 +2570,7 @@ class ServiceSecurityLayer:
 
         attacker_device = self.device(attacker)
         victim_device = self.device(victim)
-        gateway_ip = target_ip or victim_device.default_gateway or self.device_ip(
-            victim_device.interfaces[0].ip_address or "0.0.0.0"
-        ) if False else (target_ip or victim_device.default_gateway)
+        gateway_ip = target_ip or victim_device.default_gateway
         if not gateway_ip:
             neighbours = [
                 name

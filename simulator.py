@@ -664,7 +664,16 @@ class NetworkSimulator:
                 security=security_decision,
                 route=path,
             )
+            self._log_event(
+                EventType.PACKET_DROPPED,
+                f"Packet {packet.packet_id} dropped by simulated security policy",
+                flow_id=flow.flow_id if flow else None,
+                packet_id=packet.packet_id,
+                reason=security_decision.get("reason") or "FIREWALL_BLOCK",
+                route=path,
+            )
             self.time = max(self.time, packet.creation_time) + 0.001
+            self.check_heartbeats()
             self.transport.on_packet_processed(packet)
             return packet
 
@@ -1520,6 +1529,15 @@ class NetworkSimulator:
 
     def configure_service(self, name: str, device: str, values=None):
         return self.services.registry.configure(name, device, values or {})
+
+    def list_services(self, device: str = None):
+        return self.services.registry.to_dict(device)
+
+    def service_state(self) -> Dict[str, Any]:
+        return self.services.service_state()
+
+    def security_state(self) -> Dict[str, Any]:
+        return self.services.security_state()
 
     def service_status(self, device: str = None):
         return self.services.service_status(device) if device else self.services.service_status_all()

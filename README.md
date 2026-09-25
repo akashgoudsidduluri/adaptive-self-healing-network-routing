@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-174%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-266%20Passed-success)
 
 ## Overview
 
@@ -142,6 +142,8 @@ Streamlit Analysis & Experiment Labs (Traffic · QoS · Routing · Combined · S
 - `metrics.py` — Packet tracking, latency, throughput, PDR, loss, congestion, recovery time, time-series history, before/during/after comparison
 - `events.py` — Structured event system (TRAFFIC_STARTED, LINK_FAILED, FAILURE_DETECTED, ROUTE_RECALCULATED, TRAFFIC_REROUTED, etc.)
 - `simulator.py` — Central engine: heartbeat monitoring, failure detection with measurable delay, automatic rerouting, active traffic flows, congestion/loss/bandwidth effects, simulation clock
+- `services_security.py` — **Stage 10 service and security layer** attached to the same simulator: DHCP, DNS, HTTP, FTP, SMTP services, device service registry, stateful firewall, standard/extended ACLs, port filtering, simulated ARP spoofing and conflict detection, and controlled flood generation/detection
+- `test_stage10.py` — Stage 10 acceptance tests (DHCP, DNS, HTTP, FTP, SMTP, firewall, ACL, ARP, flood, integration, CLI)
 - `lab_session.py` — Editable lab session: topology CRUD, presets, traffic, faults, undo/redo, JSON import/export, diagnostics, and real simulator step state
 - `lab_server.py` — Dependency-free HTTP API/static server for the primary network laboratory
 - `lab_frontend/` — Interactive SVG topology workbench: palette, drag/drop, connections, contextual inspectors, packet animation, queue, timeline, and console
@@ -788,8 +790,9 @@ adaptive routing and self-healing engine used by the rest of NetAdapt.
 
 Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 diagnostic
 tests in `test_stage8.py`; the original transport suite adds 31 tests in
-`test_transport.py`; and Stage 9 adds 33 transport acceptance tests in
-`test_stage9.py`. The complete repository suite is 207 passing tests.
+`test_transport.py`; Stage 9 adds 33 transport acceptance tests in
+`test_stage9.py`; and Stage 10 adds 59 service and security acceptance tests in
+`test_stage10.py`. The complete repository suite is 266 passing tests.
 
 
 ## Stage 9 — TCP + UDP Transport Layer Simulation
@@ -955,6 +958,266 @@ adaptive-self-healing-network-routing/
 - [x] Scenario Lab tab in the dashboard (additive only, existing tabs unchanged)
 - [x] No fake or hardcoded experiment metrics
 - [x] README documents Stage 6
+
+
+## Stage 10 — Network Services + Basic Network Security
+
+Stage 10 adds simulated DHCP, DNS, HTTP, FTP, and SMTP services, a device
+service registry, a stateful simulated firewall, standard/extended ACLs, port
+filtering, a controlled ARP-spoofing scenario with conflict detection, and
+controlled SYN/UDP/ICMP flood generation with anomaly detection.
+
+> **Simulation only.** Everything in Stage 10 runs inside the NetAdapt
+> simulator. No real socket is opened, no real web/FTP/mail server is
+> contacted, no file on disk is read or written, and the ARP-spoofing and
+> flood scenarios never emit a single packet on the real network of the
+> machine running the lab. They only change the simulated ARP cache, the
+> simulated packet scheduler, and the simulated event log.
+
+Everything is layered on the single existing `NetworkSimulator`
+(`services_security.py`). Service traffic is generated as ordinary NetAdapt
+packets, so it uses the same adaptive routing, QoS scheduler, packet-loss
+model, failure detection, metrics, and `EventLogger` as Stages 1-9. There is no
+second simulator, no second QoS system, and no frontend-only state.
+
+### Service registry
+
+Devices host real services with `RUNNING`/`STOPPED` state and
+start/stop/restart control:
+
+| Service | Port | Protocol | QoS class |
+| ------- | ---- | -------- | --------- |
+| DHCP    | 67 (client 68) | UDP | Emergency |
+| DNS     | 53  | UDP | Emergency |
+| HTTP    | 80  | TCP | HTTP |
+| FTP     | 21  | TCP | FTP (bulk) |
+| SMTP    | 25  | TCP | HTTP |
+
+```python
+from simulator import NetworkSimulator
+
+sim = NetworkSimulator(seed=42)
+sim.install_service("HTTP", "H3")
+sim.install_service("DHCP", "H3")
+sim.list_services()            # port/protocol/state per device
+sim.stop_service("HTTP", "H3") # a stopped service fails real requests
+```
+
+A stopped service, a failed device, or a downed interface makes requests fail
+with a real reason (`SERVICE_STOPPED`, `DEVICE_DOWN`, `INTERFACE_DOWN`). The
+lab never reports fake success.
+
+### DHCP
+
+`dhcp_acquire` runs the full DISCOVER -> OFFER -> REQUEST -> ACK exchange over
+simulated UDP (68/67) and configures the real `NetworkInterface` (address,
+prefix, and device gateway). The server exposes an address pool, subnet mask,
+gateway, DNS server, and lease duration, and hands out NAK when the pool is
+exhausted.
+
+```python
+result = sim.dhcp_acquire("H1", "H3")
+result["steps"]      # ['DISCOVER', 'OFFER', 'REQUEST', 'ACK']
+result["address"]    # '192.168.1.100'
+sim.get_device("H1").interfaces[0].ip_address   # really configured
+sim.dhcp_renew("H1", "H3")
+sim.dhcp_release("H1")                          # interface cleared again
+```
+
+### DNS
+
+A records, request/response over simulated UDP, a per-client cache, TTL
+expiry, and query metrics (queries, responses, failures, cache hits/misses,
+latency). A cache hit is served without traffic; a miss really sends a query and
+a response.
+
+```python
+sim.install_service("DNS", "H3")
+sim.dns_add_record("H3", "server.netadapt.local", "192.168.1.3", ttl=300)
+sim.dns_query("H1", "server.netadapt.local", "H3")  # -> 192.168.1.3 (SERVER)
+sim.dns_query("H1", "server.netadapt.local", "H3")  # -> CACHE hit
+```
+
+### HTTP
+
+GET and POST over the existing simulated TCP connection, with 200 OK,
+400 BAD REQUEST, 404 NOT FOUND, and 500 SERVER ERROR (injectable fault). The
+request and the response are real TCP segments on the real route, and metrics
+cover requests, responses, successful/failed counts, latency, and bytes.
+
+```python
+sim.install_service("HTTP", "H3")
+sim.http_request("H1", "H3")                    # 200
+sim.http_request("H1", "H3", path="/missing")   # 404
+sim.configure_service("HTTP", "H3", {"fault": "500"})
+sim.http_request("H1", "H3")                    # 500
+```
+
+### FTP
+
+Control connection plus LIST/GET/PUT against an in-memory file store. The real
+filesystem is never touched. Metrics cover transfers, successful/failed
+transfers, bytes, and transfer time.
+
+```python
+sim.install_service("FTP", "H3")
+sim.ftp_connect("H1", "H3")                            # TCP :21
+sim.ftp_command("H1", "H3", "GET", "readme.txt")
+sim.ftp_command("H1", "H3", "PUT", "lab.txt", "hello")
+```
+
+### SMTP
+
+HELO/EHLO, MAIL FROM, RCPT TO, DATA, and QUIT over simulated TCP, with
+relay denial for foreign domains and an in-memory mailbox. No mail is ever sent.
+
+```python
+sim.install_service("SMTP", "H3")
+sim.smtp_send("H1", "H3", recipient="server@h3.netadapt.local")  # delivered
+sim.smtp_send("H1", "H3", recipient="user@elsewhere.example")    # RELAY_DENIED
+```
+
+### Firewall, ACLs, and port filtering
+
+The firewall is stateful (a 5-tuple keeps the decision made for its first
+packet) and evaluates source/destination IP, protocol, source/destination
+port, and service. ACLs come in standard (source IP) and extended (source,
+destination, protocol, port) flavours and are attached to simulated
+interfaces; a packet is evaluated against every ACL bound to a device on its
+actual route.
+
+```python
+sim.add_firewall_rule(action="DENY", protocol="TCP", destination_port=80)
+sim.http_request("H1", "H3")   # blocked, reason FIREWALL_BLOCK
+
+sim.add_port_filter("UDP", 53) # drop reason PORT_BLOCKED
+
+sim.create_acl("NO-WEB", "EXTENDED")
+sim.add_acl_entry("NO-WEB", action="DENY", source_ip="192.168.1.1",
+                  destination_ip="192.168.1.3", protocol="TCP", destination_port=80)
+sim.attach_acl("NO-WEB", "R5")  # evaluated while the packet traverses R5
+```
+
+Blocked packets are dropped by the simulator itself (real metric records, real
+`PACKET_BLOCKED`/`PACKET_DROPPED` events) with one of the reasons
+`FIREWALL_BLOCK`, `ACL_DENY`, `PORT_BLOCKED`, or `FLOOD_PROTECTION`.
+
+### ARP spoofing simulation and detection
+
+`arp_spoof(attacker, victim, gateway_ip)` forges a binding inside the victim's
+simulated ARP cache and raises `ARP_SPOOF_ATTEMPT` and `ARP_CACHE_POISONED`.
+The educational detector flags one IP mapped to several MAC addresses and
+raises `ARP_CONFLICT`/`ARP_ANOMALY_DETECTED` with IP, known MAC, new MAC,
+device, timestamp, and severity. With protection enabled the legitimate binding
+is restored. This is a teaching detector, not a production IDS.
+
+```python
+sim.arp_spoof("H2", "H1", "192.168.1.3", detect=True)
+sim.arp_state()["conflicts"]   # IP, known MAC, new MAC, device, severity
+```
+
+### Flood simulation and detection
+
+Controlled TCP SYN, UDP, and ICMP floods are generated inside the simulator
+with a configurable source, target, protocol, packets/second, and duration.
+Arrival rates are analysed in one-second windows against a configurable
+threshold, raising `TRAFFIC_SPIKE` and `FLOOD_DETECTED`; with protection
+enabled the attack packets are dropped with `FLOOD_PROTECTION`. The scenario
+reports generated/received/dropped packets, queue growth, bandwidth, and the
+latency increase.
+
+```python
+sim.start_flood("H1", "H4", protocol="UDP", rate=200, duration=1.0,
+                threshold=25, protect=True)
+sim.security_state()["flood"]["scenarios"][-1]["detected"]   # True
+```
+
+### Security events
+
+Stage 10 extends `EventType` with `DHCP_DISCOVER/OFFER/REQUEST/ACK/NAK/RELEASE`,
+`DNS_QUERY/RESPONSE/CACHE_HIT/CACHE_MISS`, `HTTP_REQUEST/RESPONSE`,
+`FTP_CONNECTION/TRANSFER`, `SMTP_MESSAGE`,
+`FIREWALL_RULE_MATCHED/PACKET_ALLOWED/PACKET_BLOCKED`,
+`ACL_MATCHED/ACL_DENIED`, `ARP_SPOOF_ATTEMPT/ARP_CACHE_POISONED/ARP_CONFLICT/
+ARP_ANOMALY_DETECTED`, and `TRAFFIC_SPIKE/FLOOD_DETECTED`.
+
+### Services & Security lab area
+
+The browser laboratory keeps the existing topology canvas and adds a
+**Services & Security** inspector (same area as the Transport Lab) with
+service start/stop/restart, DHCP/DNS/HTTP/FTP/SMTP request controls, firewall
+and port-filter rules, ACL creation and interface attachment, ARP protection
+toggles with the spoofing scenario, and flood detection controls. The packet
+inspector now shows the service message, request/query/response, assigned
+address, and the security decision (`ALLOW`/`DENY`, `MATCH`/`NO MATCH`,
+`NORMAL`/`ANOMALOUS`) with the drop reason.
+
+### CLI
+
+```
+PC1> ipconfig                 PC1> ipconfig /all
+PC1> ipconfig /renew          PC1> ipconfig /release
+PC1> nslookup server.netadapt.local
+PC1> ping 192.168.1.3         PC1> tracert 192.168.1.3
+PC1> arp -a                   PC1> route print
+PC1> netstat                  PC1> show connections
+
+Server1> show services        Server1> show service http
+Server1> show firewall        R1> show access-lists
+R1> show interfaces           R1> show ip interface brief
+R1> show ip route             R1> show running-config
+SW1> show interfaces status   SW1> show mac address-table
+SW1> show vlan brief          any> show security
+```
+
+All CLI output is generated from live simulation state (real leases, real DNS
+cache, real firewall counters, real ACL entries).
+
+### Metrics
+
+Service metrics (DHCP leases issued/released/failed, DNS queries/responses/
+cache hits/misses/failures/latency, HTTP requests/responses/successful/failed/
+latency/bytes, FTP transfers/bytes/transfer time, SMTP messages/delivered/
+failed/latency) and security metrics (packets inspected/allowed/blocked,
+firewall blocks, port blocks, ACL blocks, ARP conflicts, spoof attempts,
+detected floods, dropped attack packets, normal and suspicious packets) are
+exported through the existing state/experiment framework in
+`state()["services"]` and `state()["security"]`.
+
+### Example workflows
+
+1. **DHCP lease** - install DHCP on a server, run `ipconfig /renew` on a PC,
+   then `ipconfig /all` to see the assigned address, mask, gateway, DNS server,
+   and lease time. Run `ipconfig /release` to clear the interface again.
+2. **DNS resolution** - install DNS, add an A record, run
+   `nslookup server.netadapt.local` (server answer), then run it again (cache
+   hit) after advancing the clock past the TTL to see a new query.
+3. **HTTP service failure** - install HTTP, request `/` (200), stop the service
+   and request again (fails with `SERVICE_STOPPED`), then down the server
+   interface and request again (fails with `INTERFACE_DOWN`).
+4. **Firewall block** - add `DENY TCP dport 80`, request `/` again, and open
+   the packet inspector to see `FIREWALL_BLOCK` and the firewall decision.
+5. **ACL filtering** - create an extended ACL denying a source to a destination
+   port, attach it to a router on the route, and watch the request fail with
+   `ACL_DENY` while other clients still work.
+6. **ARP poisoning** - run the spoofing scenario, inspect
+   `show security` for the conflict, then enable protection and re-run to see
+   the legitimate binding restored.
+7. **Flood detection** - start a controlled UDP flood above the threshold and
+   inspect `TRAFFIC_SPIKE`/`FLOOD_DETECTED` plus queue growth, bandwidth, and
+   dropped attack packets; enable protection to drop the attack traffic.
+
+### Known Stage 10 limitations
+
+- Services are educational models, not RFC-complete stacks: HTTP/FTP/SMTP use
+  simplified request/response semantics on top of the simulated transport.
+- Each application request opens its own simulated control connection, so
+  session resumption and pipelining are not modelled.
+- DNS supports A records only (no MX/NS/AAAA, no recursive resolvers).
+- The ARP detector is a simple one-IP-many-MACs check; it is intentionally a
+  teaching detector and makes no claim about production intrusion detection.
+- Flood thresholds are compared against simulated arrival rates inside the
+  simulator clock, not against real NIC counters.
 
 ## Known Limitations
 

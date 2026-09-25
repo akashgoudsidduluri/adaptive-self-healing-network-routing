@@ -187,6 +187,112 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.inspect_mac(str(payload["id"]))
             elif action == "clear_mac":
                 result = SESSION.clear_mac(str(payload["id"]))
+            elif action == "service_install":
+                result = SESSION.install_service(
+                    str(payload["name"]), str(payload["id"]), payload.get("config", {})
+                )
+            elif action == "service_remove":
+                result = SESSION.remove_service(str(payload["name"]), str(payload["id"]))
+            elif action == "service_control":
+                result = SESSION.service_control(
+                    str(payload["control"]), str(payload["name"]), str(payload["id"])
+                )
+            elif action == "service_configure":
+                result = SESSION.configure_service(
+                    str(payload["name"]), str(payload["id"]), payload.get("values", {})
+                )
+            elif action == "dhcp_acquire":
+                result = SESSION.dhcp_acquire(str(payload["client"]), payload.get("server"))
+            elif action == "dhcp_renew":
+                result = SESSION.dhcp_renew(str(payload["client"]), payload.get("server"))
+            elif action == "dhcp_release":
+                result = SESSION.dhcp_release(str(payload["client"]))
+            elif action == "dns_query":
+                result = SESSION.dns_query(
+                    str(payload["client"]),
+                    str(payload["hostname"]),
+                    payload.get("server"),
+                )
+            elif action == "dns_record":
+                result = SESSION.dns_add_record(
+                    str(payload["id"]),
+                    str(payload["hostname"]),
+                    str(payload["address"]),
+                    float(payload.get("ttl", 300)),
+                )
+            elif action == "http_request":
+                result = SESSION.http_request(
+                    str(payload["client"]),
+                    payload.get("server"),
+                    str(payload.get("method", "GET")),
+                    str(payload.get("path", "/")),
+                    payload.get("body"),
+                )
+            elif action == "ftp_command":
+                result = SESSION.ftp_command(
+                    str(payload["client"]),
+                    payload.get("server"),
+                    str(payload.get("command", "LIST")),
+                    payload.get("filename"),
+                    payload.get("content"),
+                )
+            elif action == "smtp_send":
+                result = SESSION.smtp_send(
+                    str(payload["client"]),
+                    payload.get("server"),
+                    str(payload.get("sender", "student@netadapt.local")),
+                    str(payload.get("recipient", "server@netadapt.local")),
+                    str(payload.get("subject", "Stage 10 lab message")),
+                    str(payload.get("body", "Hello from NetAdapt.")),
+                )
+            elif action == "firewall_add_rule":
+                result = SESSION.firewall_add_rule(payload.get("rule", payload))
+            elif action == "firewall_remove_rule":
+                result = SESSION.firewall_remove_rule(int(payload["rule_id"]))
+            elif action == "firewall_clear":
+                result = SESSION.firewall_clear()
+            elif action == "acl_create":
+                result = SESSION.acl_create(
+                    str(payload["name"]), str(payload.get("type", "STANDARD"))
+                )
+            elif action == "acl_add_entry":
+                result = SESSION.acl_add_entry(
+                    str(payload["name"]), payload.get("entry", payload)
+                )
+            elif action == "acl_attach":
+                result = SESSION.acl_attach(
+                    str(payload["name"]),
+                    str(payload["id"]),
+                    str(payload.get("interface_id", "eth0")),
+                )
+            elif action == "acl_detach":
+                result = SESSION.acl_detach(
+                    str(payload["name"]),
+                    str(payload["id"]),
+                    str(payload.get("interface_id", "eth0")),
+                )
+            elif action == "acl_remove":
+                result = SESSION.acl_remove(str(payload["name"]))
+            elif action == "security_configure":
+                result = SESSION.configure_security(payload.get("values", payload))
+            elif action == "arp_spoof":
+                result = SESSION.arp_spoof(
+                    str(payload["attacker"]),
+                    str(payload["victim"]),
+                    payload.get("target_ip"),
+                    bool(payload.get("detect", True)),
+                    payload.get("protect"),
+                )
+            elif action == "flood_start":
+                result = SESSION.start_flood(
+                    str(payload["attacker"]),
+                    str(payload["target"]),
+                    str(payload.get("protocol", "UDP")),
+                    float(payload.get("rate", 1000)),
+                    float(payload.get("duration", 1.0)),
+                    payload.get("threshold"),
+                    payload.get("protect"),
+                )
             elif action == "console":
                 result = SESSION.console(str(payload["id"]), str(payload["command"]))
             else:

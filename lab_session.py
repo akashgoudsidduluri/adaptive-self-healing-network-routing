@@ -14,6 +14,16 @@ import json
 import re
 
 from devices import NetworkInterface
+from services_security import (
+    DROP_ACL,
+    DROP_ARP,
+    DROP_FIREWALL,
+    DROP_FLOOD,
+    DROP_PORT,
+    SERVICE_NAMES,
+    SERVICE_PORTS,
+    normalise_service,
+)
 from simulator import NetworkSimulator
 from topology import NetworkTopology
 
@@ -43,6 +53,8 @@ class LabSession:
         self.last_packet: Optional[Dict[str, Any]] = None
         self.diagnostic_result: Optional[Dict[str, Any]] = None
         self.transport_result: Optional[Dict[str, Any]] = None
+        self.service_result: Optional[Dict[str, Any]] = None
+        self.security_result: Optional[Dict[str, Any]] = None
         self._counter = 1
         self.simulator: NetworkSimulator
         self.load_preset("self_healing", record=False)
@@ -139,6 +151,8 @@ class LabSession:
 
         self.diagnostic_result = None
         self.transport_result = None
+        self.service_result = None
+        self.security_result = None
         self.simulator = NetworkSimulator(
             topology=topology,
             seed=seed,
@@ -644,12 +658,283 @@ class LabSession:
             self.transport_result = compare_transport(self.simulator, source, destination, packet_count, payload_size)
             return self.state()
 
+    # ------------------------------------------------------------------
+    # Stage 10 network services
+    # ------------------------------------------------------------------
+    def install_service(self, name: str, device: str, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                self.simulator.install_service(name, device, **(config or {}))
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self._update_document()
+            return self.state()
+
+    def remove_service(self, name: str, device: str) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.remove_service(name, device)
+            return self.state()
+
+    def start_service(self, name: str, device: str) -> Dict[str, Any]:
+        return self.service_control("start", name, device)
+
+    def stop_service(self, name: str, device: str) -> Dict[str, Any]:
+        return self.service_control("stop", name, device)
+
+    def restart_service(self, name: str, device: str) -> Dict[str, Any]:
+        return self.service_control("restart", name, device)
+
+    def service_control(self, action: str, name: str, device: str) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                if action == "start":
+                    self.simulator.start_service(name, device)
+                elif action == "stop":
+                    self.simulator.stop_service(name, device)
+                elif action == "restart":
+                    self.simulator.restart_service(name, device)
+                else:
+                    raise LabError(f"Unknown service action: {action}")
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self.state()
+
+    def configure_service(self, name: str, device: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                self.simulator.configure_service(name, device, values)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self.state()
+
+    def _service_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        self.service_result = result
+        return self.state()
+
+    def dhcp_acquire(self, client: str, server: Optional[str] = None) -> Dict[str, Any]:
+        with self.lock:
+            result = self.simulator.dhcp_acquire(client, server)
+            self.running = True
+            return self._service_result(result)
+
+    def dhcp_renew(self, client: str, server: Optional[str] = None) -> Dict[str, Any]:
+        with self.lock:
+            return self._service_result(self.simulator.dhcp_renew(client, server))
+
+    def dhcp_release(self, client: str) -> Dict[str, Any]:
+        with self.lock:
+            return self._service_result(self.simulator.dhcp_release(client))
+
+    def dns_query(self, client: str, hostname: str, server: Optional[str] = None) -> Dict[str, Any]:
+        with self.lock:
+            return self._service_result(self.simulator.dns_query(client, hostname, server))
+
+    def dns_add_record(self, server: str, hostname: str, address: str, ttl: float = 300.0) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                self.simulator.dns_add_record(server, hostname, address, ttl)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self.state()
+
+    def http_request(
+        self,
+        client: str,
+        server: Optional[str] = None,
+        method: str = "GET",
+        path: str = "/",
+        body: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            return self._service_result(
+                self.simulator.http_request(client, server, method=method, path=path, body=body)
+            )
+
+    def ftp_command(
+        self,
+        client: str,
+        server: Optional[str] = None,
+        command: str = "LIST",
+        filename: Optional[str] = None,
+        content: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            if str(command).upper() == "CONNECT":
+                return self._service_result(self.simulator.ftp_connect(client, server))
+            return self._service_result(
+                self.simulator.ftp_command(
+                    client, server, command=command, filename=filename, content=content
+                )
+            )
+
+    def smtp_send(
+        self,
+        client: str,
+        server: Optional[str] = None,
+        sender: str = "student@netadapt.local",
+        recipient: str = "server@netadapt.local",
+        subject: str = "Stage 10 lab message",
+        body: str = "Hello from the NetAdapt simulated SMTP service.",
+    ) -> Dict[str, Any]:
+        with self.lock:
+            return self._service_result(
+                self.simulator.smtp_send(
+                    client, server, sender=sender, recipient=recipient, subject=subject, body=body
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # Stage 10 security
+    # ------------------------------------------------------------------
+    def _security_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        self.security_result = result
+        return self.state()
+
+    # Convenience aliases matching the simulator-level API names.
+    def add_firewall_rule(self, **values: Any) -> Dict[str, Any]:
+        return self.firewall_add_rule(values)
+
+    def add_acl_entry(self, name: str, **values: Any) -> Dict[str, Any]:
+        return self.acl_add_entry(name, values)
+
+    def create_acl(self, name: str, acl_type: str = "STANDARD") -> Dict[str, Any]:
+        return self.acl_create(name, acl_type)
+
+    def attach_acl(self, name: str, device: str, interface_id: str = "eth0") -> Dict[str, Any]:
+        return self.acl_attach(name, device, interface_id)
+
+    def firewall_add_rule(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                if values.get("port_filter"):
+                    rule = self.simulator.add_port_filter(
+                        str(values.get("protocol") or "TCP"),
+                        int(values.get("port", 0)),
+                        str(values.get("action", "DENY")).upper(),
+                        values.get("device"),
+                    )
+                else:
+                    rule = self.simulator.add_firewall_rule(**values)
+            except (TypeError, ValueError) as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(rule.to_dict())
+
+    def firewall_remove_rule(self, rule_id: int) -> Dict[str, Any]:
+        with self.lock:
+            if not self.simulator.services.firewall.remove_rule(int(rule_id)):
+                raise LabError(f"Unknown firewall rule: {rule_id}")
+            return self._security_result({"removed": int(rule_id)})
+
+    def firewall_clear(self) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.services.firewall.clear()
+            return self._security_result({"cleared": True})
+
+    def acl_create(self, name: str, acl_type: str = "STANDARD") -> Dict[str, Any]:
+        with self.lock:
+            try:
+                acl = self.simulator.create_acl(name, acl_type)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(acl.to_dict())
+
+    def acl_add_entry(self, name: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                entry = self.simulator.add_acl_entry(name, **values)
+            except (TypeError, ValueError) as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(entry.to_dict())
+
+    def acl_attach(self, name: str, device: str, interface_id: str = "eth0") -> Dict[str, Any]:
+        with self.lock:
+            if device not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {device}")
+            try:
+                acl = self.simulator.attach_acl(name, device, interface_id)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(acl.to_dict())
+
+    def acl_detach(self, name: str, device: str, interface_id: str = "eth0") -> Dict[str, Any]:
+        with self.lock:
+            try:
+                acl = self.simulator.services.acls.detach(name, device, interface_id)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(acl.to_dict())
+
+    def acl_remove(self, name: str) -> Dict[str, Any]:
+        with self.lock:
+            if not self.simulator.services.acls.remove(name):
+                raise LabError(f"Unknown access list: {name}")
+            return self._security_result({"removed": name})
+
+    def configure_security(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            layer = self.simulator.services
+            if "arp_detection" in values:
+                layer.arp_detection = bool(values["arp_detection"])
+            if "arp_protection" in values:
+                layer.arp_protection = bool(values["arp_protection"])
+            if "flood_protection" in values:
+                layer.flood_protection = bool(values["flood_protection"])
+            if "flood_threshold" in values:
+                layer.flood_threshold = max(1.0, float(values["flood_threshold"]))
+            return self._security_result(self.simulator.security_state())
+
+    def arp_spoof(
+        self,
+        attacker: str,
+        victim: str,
+        target_ip: Optional[str] = None,
+        detect: bool = True,
+        protect: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                result = self.simulator.arp_spoof(
+                    attacker, victim, target_ip, detect=detect, protect=protect
+                )
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            return self._security_result(result)
+
+    def start_flood(
+        self,
+        attacker: str,
+        target: str,
+        protocol: str = "UDP",
+        rate: float = 1000.0,
+        duration: float = 1.0,
+        threshold: Optional[float] = None,
+        protect: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            try:
+                result = self.simulator.start_flood(
+                    attacker,
+                    target,
+                    protocol=protocol,
+                    rate=rate,
+                    duration=duration,
+                    threshold=threshold,
+                    protect=protect,
+                )
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self.running = True
+            return self._security_result(result)
+
     def console(self, device_name: str, command: str) -> Dict[str, Any]:
         with self.lock:
             device = self.simulator.topology.get_device(device_name)
             if device is None:
                 raise LabError(f"Unknown device: {device_name}")
             normalized = " ".join(str(command).strip().split()).lower()
+            stage10 = self._console_stage10(device_name, normalized)
+            if stage10 is not None:
+                return {**stage10, "command": command}
             if normalized in {"netstat", "netstat -a", "show transport connections", "show transport"}:
                 stats = self.simulator.get_transport_statistics()
                 flows = stats["connections"] + stats["udp_flows"]
@@ -714,23 +999,6 @@ class LabSession:
     # ------------------------------------------------------------------
     # Stage 10 services and security controls
     # ------------------------------------------------------------------
-    def install_service(self, name: str, device: str, **config) -> Dict[str, Any]:
-        with self.lock:
-            self.simulator.install_service(name, device, **config)
-            return self.state()
-
-    def service_control(self, name: str, device: str, action: str) -> Dict[str, Any]:
-        with self.lock:
-            if action == "start":
-                self.simulator.start_service(name, device)
-            elif action == "stop":
-                self.simulator.stop_service(name, device)
-            elif action == "restart":
-                self.simulator.restart_service(name, device)
-            else:
-                raise LabError("Service action must be start, stop, or restart")
-            return self.state()
-
     def service_request(self, name: str, client: str, **values) -> Dict[str, Any]:
         with self.lock:
             name = name.upper()
@@ -770,6 +1038,294 @@ class LabSession:
                 raise LabError(f"Unknown security action: {action}")
             self.security_result = rule.to_dict() if hasattr(rule, "to_dict") else rule
             return self.state()
+
+    # ------------------------------------------------------------------
+    # Stage 10 CLI helpers (device commands backed by live simulation state)
+    # ------------------------------------------------------------------
+    def _console_stage10(self, device_name: str, normalized: str) -> Optional[Dict[str, Any]]:
+        services = self.simulator.services
+
+        if normalized in {"ipconfig", "ipconfig /all", "ifconfig", "ifconfig -a"}:
+            device = self.simulator.topology.get_device(device_name)
+            detail = normalized.endswith("/all") or normalized.endswith("-a")
+            lines = [f"{device_name} {device.device_type}"]
+            for interface in device.interfaces:
+                lease = services.leases.get(device_name)
+                lines.append(
+                    f"  {interface.interface_id}: MAC {interface.mac_address} "
+                    f"IP {interface.ip_address or 'unassigned'}/{interface.prefix} "
+                    f"mask {interface.subnet_mask or 'n/a'} gateway {device.default_gateway or 'n/a'}"
+                )
+                if detail:
+                    client = services.dhcp_clients.get(device_name, {})
+                    lines.append(
+                        f"    DHCP server : {client.get('server', 'none')}"
+                    )
+                    lines.append(
+                        f"    Lease time  : {client.get('lease_time', 'n/a')}s"
+                    )
+                    lines.append(
+                        f"    DNS servers : {', '.join(client.get('dns_servers', [])) or 'n/a'}"
+                    )
+                    lines.append(f"    Status      : {interface.status}")
+            return {"output": "\n".join(lines), "device": device_name}
+
+        if normalized in {"ipconfig /renew", "ipconfig /release"}:
+            renew = normalized.endswith("/renew")
+            result = (
+                self.simulator.dhcp_renew(device_name)
+                if renew
+                else self.simulator.dhcp_release(device_name)
+            )
+            self.service_result = result
+            verb = "renewed" if renew else "released"
+            if result.get("success"):
+                address = result.get("address", "none")
+                if renew:
+                    output = f"{verb} DHCP lease for {device_name}: {address}"
+                else:
+                    output = f"released DHCP lease for {device_name}"
+            else:
+                output = f"ipconfig: {verb} failed ({result.get('reason', 'unknown')})"
+            return {"output": output, "result": result, "success": bool(result.get("success"))}
+
+        if normalized.startswith("nslookup "):
+            hostname = normalized.split(" ", 1)[1]
+            result = self.simulator.dns_query(device_name, hostname)
+            self.service_result = result
+            if result.get("success"):
+                output = (
+                    f"Server:    {result['server']}\n"
+                    f"Address:   {result['server']}\n\n"
+                    f"Name:      {result['hostname']}\n"
+                    f"Address:   {result['address']}   (from {result.get('source', 'SERVER')})"
+                )
+            else:
+                output = (
+                    f"** server can't find {hostname}: {result.get('reason', 'NXDOMAIN')}"
+                )
+            return {"output": output, "result": result, "success": bool(result.get("success"))}
+
+        if normalized == "route print":
+            table = []
+            for device in self.simulator.topology.devices.values():
+                if not device.is_router:
+                    continue
+                for entry in self.simulator.routing_table(device.name).entries:
+                    table.append(
+                        f"{device.name:<6} {entry.destination_network}/{entry.prefix}"
+                        f"  via {entry.next_hop or 'DIRECT'}  {entry.outgoing_interface}"
+                        f"  metric {entry.metric:g}"
+                    )
+            for device in self.simulator.topology.devices.values():
+                if device.is_router or not device.default_gateway:
+                    continue
+                for interface in device.interfaces:
+                    table.append(
+                        f"{device.name:<6} 0.0.0.0/0  via {device.default_gateway}"
+                        f"  {interface.interface_id}"
+                    )
+            return {
+                "output": "\n".join(["IPv4 Route Table", *table]) if table else "No routes",
+                "routes": table,
+            }
+
+        if normalized in {"show services", "show service"}:
+            rows = services.service_status(device_name)
+            if not rows:
+                return {"output": f"No services installed on {device_name}.", "services": []}
+            lines = [
+                f"{device_name} ({self.simulator.services.device_ip(device_name) or 'no ip'})",
+                f"{'SERVICE':<8}{'PORT':<7}{'PROTO':<7}{'QOS CLASS':<12}{'STATE':<9}REQUESTS",
+            ]
+            for row in rows:
+                lines.append(
+                    f"{row['name']:<8}{row['port']:<7}{row['protocol']:<7}"
+                    f"{row['traffic_class']:<12}{row['state']:<9}{row['requests']}"
+                    + (f"  ({row['unavailable_reason']})" if row["unavailable_reason"] else "")
+                )
+            return {"output": "\n".join(lines), "services": rows}
+
+        if normalized.startswith("show service "):
+            name = normalized.split(" ", 2)[2]
+            try:
+                instance = services.registry.require(name, device_name)
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            ready, reason = services.service_ready(instance)
+            rows = services.service_status(device_name)
+            return {
+                "output": "\n".join(
+                    [
+                        f"Service : {instance.name}",
+                        f"Device  : {instance.device}",
+                        f"IP      : {services.device_ip(instance.device)}",
+                        f"Port    : {instance.port}/{instance.protocol}",
+                        f"QoS     : {instance.traffic_class}",
+                        f"State   : {instance.state}"
+                        + ("" if ready else f" (unavailable: {reason})"),
+                        f"Requests: {instance.requests}  Failures: {instance.failures}",
+                        f"Config  : {json.dumps(instance.config, sort_keys=True)}",
+                    ]
+                ),
+                "service": instance.to_dict(),
+                "status": next((row for row in rows if row["name"] == instance.name), None),
+            }
+
+        if normalized == "show firewall":
+            firewall = services.firewall.to_dict()
+            lines = [
+                f"Firewall on {device_name}: {'ENABLED' if firewall['active'] else 'NO RULES'} "
+                f"(default action {firewall['default_action']})",
+                f"Inspected: {firewall['packets_inspected']}  "
+                f"Allowed: {firewall['packets_allowed']}  Blocked: {firewall['packets_blocked']}",
+            ]
+            for rule in firewall["rules"]:
+                lines.append(
+                    f"  rule {rule['rule_id']}: {rule['action']} {rule['protocol'] or 'any'} "
+                    f"{rule['source_ip']} -> {rule['destination_ip']} "
+                    f"dport {rule['destination_port'] or 'any'} [{rule['reason']}] "
+                    f"matched {rule['packets_matched']}"
+                )
+            return {"output": "\n".join(lines), "firewall": firewall}
+
+        if normalized in {"show access-lists", "show acl"}:
+            acls = services.acls.to_dict()
+            if not acls:
+                return {"output": "No access lists configured.", "access_lists": []}
+            lines = []
+            for acl in acls:
+                lines.append(f"{acl['name']} ({acl['type']})")
+                for entry in acl["entries"]:
+                    lines.append(
+                        f"  {entry['sequence']} {entry['action']} {entry['source_ip']} "
+                        f"{entry['protocol'] or 'any'} {entry['destination_ip']} "
+                        f"eq {entry['destination_port'] or 'any'}"
+                    )
+                for attachment in acl["attachments"]:
+                    lines.append(
+                        f"  applied to {attachment['device']} {attachment['interface_id']}"
+                    )
+            return {"output": "\n".join(lines), "access_lists": acls}
+
+        if normalized == "show connections":
+            stats = self.simulator.get_transport_statistics()
+            flows = [
+                flow
+                for flow in stats["connections"] + stats["udp_flows"]
+                if device_name in {flow["source"], flow["destination"]}
+            ]
+            if not flows:
+                return {"output": f"No active connections on {device_name}.", "flows": []}
+            lines = ["Proto  Local endpoint            Remote endpoint            State"]
+            for flow in flows:
+                lines.append(
+                    f"{flow['protocol']:<6}{flow['source']}:{flow['source_port']:<22}"
+                    f"{flow['destination']}:{flow['destination_port']:<23}{flow['state']}"
+                )
+            return {"output": "\n".join(lines), "flows": flows}
+
+        if normalized in {"show ip interface brief", "show ip interface"}:
+            device = self.simulator.topology.get_device(device_name)
+            if not device.is_router:
+                raise LabError("show ip interface brief is only available on routers")
+            lines = [f"{'Interface':<12}{'IP-Address':<16}{'Status':<9}{'Protocol':<10}Services"]
+            for interface in device.interfaces:
+                services_here = [
+                    f"{row['name']}/{row['port']}"
+                    for row in services.service_status(device_name)
+                    if row["available"]
+                ]
+                lines.append(
+                    f"{interface.interface_id:<12}{interface.ip_address or 'unassigned':<16}"
+                    f"{interface.status:<9}{'up' if interface.status == 'UP' else 'down':<10}"
+                    f"{', '.join(services_here) or '-'}"
+                )
+            return {"output": "\n".join(lines), "device": device_name}
+
+        if normalized == "show running-config":
+            device = self.simulator.topology.get_device(device_name)
+            lines = [
+                f"! NetAdapt simulated running configuration for {device_name}",
+                f"hostname {device_name}",
+                f"device-type {device.device_type}",
+                f"default-gateway {device.default_gateway or 'none'}",
+            ]
+            for interface in device.interfaces:
+                lines.append(
+                    f"interface {interface.interface_id}"
+                )
+                lines.append(f"  ip address {interface.ip_address or 'dhcp'}"
+                             f" {interface.prefix}")
+                lines.append(f"  mac address {interface.mac_address}")
+                lines.append(f"  {interface.status.lower()}")
+            for acl in services.acls.to_dict():
+                for attachment in acl["attachments"]:
+                    if attachment["device"] != device_name:
+                        continue
+                    lines.append(f"! access-list {acl['name']} applied on {attachment['interface_id']}")
+                    for entry in acl["entries"]:
+                        lines.append(
+                            f"access-list {entry['sequence']} {entry['action'].lower()} "
+                            f"{entry['protocol'] or 'ip'} {entry['source_ip']} "
+                            f"{entry['destination_ip']} {entry['destination_port'] or ''}".rstrip()
+                        )
+            for rule in services.firewall.rules:
+                if rule.device in (None, device_name):
+                    lines.append(
+                        f"firewall rule {rule.rule_id} {rule.action.lower()} "
+                        f"{rule.protocol or 'any'} {rule.source_ip} -> {rule.destination_ip} "
+                        f"dport {rule.destination_port or 'any'}"
+                    )
+            return {"output": "\n".join(lines), "device": device_name}
+
+        if normalized in {"show mac address-table", "show mac-address-table"}:
+            device = self.simulator.topology.get_device(device_name)
+            if not device.is_switch:
+                raise LabError("show mac address-table is only available on switches")
+            rows = self.simulator.mac_table(device_name)
+            if not rows:
+                return {"output": "Mac Address Table is empty.", "entries": []}
+            lines = [f"{'MAC Address':<20}{'Interface':<12}Type"]
+            lines.extend(
+                f"{row['mac_address']:<20}{row['interface_id']:<12}{row['type']}" for row in rows
+            )
+            return {"output": "\n".join(lines), "entries": rows}
+
+        if normalized == "show vlan brief":
+            device = self.simulator.topology.get_device(device_name)
+            rows = [
+                {
+                    "vlan": "1",
+                    "name": "default",
+                    "status": "active",
+                    "ports": [interface.interface_id for interface in device.interfaces],
+                }
+            ]
+            lines = [f"{'VLAN':<6}{'Name':<12}{'Status':<10}Ports"]
+            lines.append(f"{'1':<6}{'default':<12}{'active':<10}{', '.join(rows[0]['ports'])}")
+            return {"output": "\n".join(lines), "vlans": rows}
+
+        if normalized in {"show security", "show arp security"}:
+            state = services.security_state()
+            lines = [
+                f"ARP detection: {'enabled' if state['arp']['detection_enabled'] else 'disabled'}",
+                f"ARP protection: {'enabled' if state['arp']['protection_enabled'] else 'disabled'}",
+                f"Spoof attempts: {state['arp']['spoof_attempts']}  "
+                f"conflicts: {len(state['arp']['conflicts'])}",
+                f"Flood threshold: {state['flood']['threshold']:g} pps  "
+                f"protection: {'enabled' if state['flood']['protection_enabled'] else 'disabled'}",
+                f"Detected floods: {state['flood']['detected_floods']}",
+            ]
+            for conflict in state["arp"]["conflicts"]:
+                lines.append(
+                    f"  CONFLICT {conflict['ip_address']} {conflict['known_mac']} -> "
+                    f"{conflict['new_mac']} on {conflict['device']} "
+                    f"({conflict.get('attacker')}) severity={conflict['severity']}"
+                )
+            return {"output": "\n".join(lines), "security": state}
+
+        return None
 
     def undo(self) -> Dict[str, Any]:
         with self.lock:
@@ -833,6 +1389,13 @@ class LabSession:
                 ]
                 packet_state["journey"] = transport_events or events
                 packet_state["drop_reason"] = transport_packet.drop_reason or drop_reason
+            service_info = getattr(packet, "service", None)
+            if service_info:
+                packet_state["service"] = dict(service_info)
+                packet_state["service_name"] = service_info.get("service")
+            security_info = getattr(packet, "security", None)
+            if security_info:
+                packet_state["security"] = dict(security_info)
             packets.append(packet_state)
         return packets[-200:]
 
@@ -904,6 +1467,14 @@ class LabSession:
                     "weights": self.simulator.get_wfq_weights(),
                 },
                 "routing_tables": routing_tables,
+                "services": {
+                    **self.simulator.service_state(),
+                    "result": deepcopy(self.service_result),
+                },
+                "security": {
+                    **self.simulator.security_state(),
+                    "result": deepcopy(self.security_result),
+                },
                 "can_undo": bool(self.history),
                 "can_redo": bool(self.future),
             }
