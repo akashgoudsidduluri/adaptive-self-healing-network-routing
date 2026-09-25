@@ -42,6 +42,7 @@ class LabSession:
         self.speed = 1.0
         self.last_packet: Optional[Dict[str, Any]] = None
         self.diagnostic_result: Optional[Dict[str, Any]] = None
+        self.transport_result: Optional[Dict[str, Any]] = None
         self._counter = 1
         self.simulator: NetworkSimulator
         self.load_preset("self_healing", record=False)
@@ -137,6 +138,7 @@ class LabSession:
                 topology.fail_link(u, v)
 
         self.diagnostic_result = None
+        self.transport_result = None
         self.simulator = NetworkSimulator(
             topology=topology,
             seed=seed,
@@ -440,6 +442,7 @@ class LabSession:
                 drop_reason = next((event["details"].get("reason") for event in reversed(packet_events) if event["details"].get("reason")), None)
                 if packet.delivery_status == "DROPPED" and drop_reason == "NO_ROUTE":
                     drop_reason = "DESTINATION_UNREACHABLE"
+                transport_packet = getattr(packet, "transport", None)
                 self.last_packet = {
                     "id": packet.packet_id,
                     "source": packet.source,
@@ -458,6 +461,10 @@ class LabSession:
                     "journey": packet_events,
                     "events": packet_events,
                 }
+                if transport_packet is not None:
+                    self.last_packet.update(transport_packet.to_dict())
+                    self.last_packet["size"] = transport_packet.payload_size
+                    self.last_packet["journey"] = packet_events
             self._update_document()
             return self.state()
 
@@ -584,6 +591,59 @@ class LabSession:
                 "message": f"Cleared {removed} MAC entr{'y' if removed == 1 else 'ies'}.",
             })
 
+    def create_transport(self, protocol: str, source: str, destination: str, source_port: int = 5000, destination_port: int = 8080, payload_size: int = 1000, initial_cwnd: int = 1, receiver_window: int = 8, ssthresh: float = 16.0, timeout: float = 0.1, traffic_class: str = "HTTP") -> Dict[str, Any]:
+        with self.lock:
+            if protocol.upper() == "TCP":
+                self.simulator.create_tcp_connection(source, destination, source_port, destination_port, initial_cwnd, receiver_window, ssthresh, timeout, traffic_class)
+                # The live lab advances the same queued handshake packets that
+                # the simulator-level API exposes; the UI never fabricates a
+                # connection state independently.
+                self.simulator.run_until_empty()
+            elif protocol.upper() == "UDP":
+                self.simulator.create_udp_flow(source, destination, source_port, destination_port, payload_size, traffic_class)
+            else:
+                raise LabError("Transport protocol must be TCP or UDP")
+            self.running = True
+            return self.state()
+
+    def send_transport_data(self, protocol: str, flow_id: str, packet_count: int = 1, payload_size: int = 1000) -> Dict[str, Any]:
+        with self.lock:
+            if protocol.upper() == "TCP":
+                self.simulator.send_tcp_data(flow_id, packet_count, payload_size)
+            elif protocol.upper() == "UDP":
+                self.simulator.send_udp_data(flow_id, packet_count, payload_size)
+            else:
+                raise LabError("Transport protocol must be TCP or UDP")
+            self.simulator.run_until_empty()
+            return self.state()
+
+    def close_transport(self, flow_id: str) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.close_tcp_connection(flow_id)
+            self.simulator.run_until_empty()
+            return self.state()
+
+    def process_transport_tick(self, delta: float = 0.1) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.tick(float(delta))
+            # A timeout tick may enqueue a retransmission. Process that packet
+            # through the same routing/QoS path immediately so the live panel
+            # reflects actual delivery and ACK recovery.
+            self.simulator.run_until_empty()
+            return self.state()
+
+    def reset_transport(self) -> Dict[str, Any]:
+        with self.lock:
+            self.simulator.transport.reset()
+            self.transport_result = None
+            return self.state()
+
+    def compare_transport(self, source: str, destination: str, packet_count: int = 6, payload_size: int = 1000) -> Dict[str, Any]:
+        with self.lock:
+            from transport import compare_transport
+            self.transport_result = compare_transport(self.simulator, source, destination, packet_count, payload_size)
+            return self.state()
+
     def console(self, device_name: str, command: str) -> Dict[str, Any]:
         with self.lock:
             device = self.simulator.topology.get_device(device_name)
@@ -650,7 +710,8 @@ class LabSession:
             drop_reason = next((event["details"].get("reason") for event in reversed(events) if event["details"].get("reason")), None)
             if packet.delivery_status == "DROPPED" and drop_reason == "NO_ROUTE":
                 drop_reason = "DESTINATION_UNREACHABLE"
-            packets.append({
+            transport_packet = getattr(packet, "transport", None)
+            packet_state = {
                 "id": packet.packet_id,
                 "packet_id": packet.packet_id,
                 "source": packet.source,
@@ -667,7 +728,20 @@ class LabSession:
                 "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
                 "drop_reason": drop_reason,
                 "journey": events,
-            })
+            }
+            if transport_packet is not None:
+                packet_state.update(transport_packet.to_dict())
+                packet_state["size"] = transport_packet.payload_size
+                packet_ids = {packet.packet_id, transport_packet.packet_id}
+                transport_events = [
+                    event.to_dict()
+                    for event in self.simulator.event_logger.events
+                    if event.details.get("packet_id") in packet_ids
+                    or (event.flow_id == transport_packet.flow_id and event.details.get("sequence_number") == transport_packet.sequence_number)
+                ]
+                packet_state["journey"] = transport_events or events
+                packet_state["drop_reason"] = transport_packet.drop_reason or drop_reason
+            packets.append(packet_state)
         return packets[-200:]
 
     def state(self) -> Dict[str, Any]:
@@ -721,6 +795,13 @@ class LabSession:
                 "last_packet": self.last_packet,
                 "packets": self._packet_states(),
                 "diagnostic_result": deepcopy(self.diagnostic_result),
+                "transport": {
+                    "flows": self.simulator.get_transport_flows(),
+                    "connections": self.simulator.get_transport_statistics()["connections"],
+                    "udp_flows": self.simulator.get_transport_statistics()["udp_flows"],
+                    "statistics": self.simulator.get_transport_statistics(),
+                    "result": deepcopy(self.transport_result),
+                },
                 "queue": {"length": queue.get("current_queue_length", 0), "max": queue.get("max_queue_length", 0), "average_wait": queue.get("average_waiting_time", 0.0)},
                 "metrics": {"sent": metrics["packets_sent"], "delivered": metrics["packets_delivered"], "dropped": metrics["packets_dropped"], "pdr": metrics["packet_delivery_ratio"], "latency": metrics["average_latency"] * 1000, "throughput": metrics["throughput"], "route_changes": sum(1 for event in self.simulator.event_logger.events if event.event_type == "ROUTE_RECALCULATED")},
                 "events": [event.to_dict() for event in self.simulator.event_logger.get_events(limit=40)],

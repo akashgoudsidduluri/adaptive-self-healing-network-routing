@@ -4,7 +4,7 @@
 
 ![Status](https://img.shields.io/badge/Editable%20Network%20Laboratory-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/Tests-143%20Passed-success)
+![Tests](https://img.shields.io/badge/Tests-174%20Passed-success)
 
 ## Overview
 
@@ -770,7 +770,7 @@ Device/interface failure integration is available through
 through the existing heartbeat/self-healing path, so adaptive routing and
 rerouting continue to work with the new infrastructure model.
 
-## Stage 8 — Network Diagnostics and Packet Inspection
+## Stage 8A — Network Diagnostics and Packet Inspection
 
 Stage 8 adds a compact diagnostic toolbar to the existing network laboratory.
 It does not introduce TCP, UDP, DNS, HTTP, or another dashboard. Every result
@@ -788,8 +788,43 @@ adaptive routing and self-healing engine used by the rest of NetAdapt.
 
 Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 focused
 tests in `test_stage8.py`; and the editable laboratory adds 14 integration
-tests in `test_lab.py`. The complete repository suite is 143 passing tests.
+tests in `test_lab.py`. The complete repository suite is 174 passing tests.
 
+
+## Stage 8 — Transport Layer Simulation
+
+Stage 8 adds a deterministic, educational TCP and UDP layer on top of the
+existing topology, adaptive router, QoS scheduler, packet-loss model, failure
+detection, and EventLogger. It does not open sockets and does not implement
+application-layer protocols.
+
+### Transport concepts
+
+- UDP is connectionless: packets use source/destination ports and payload sizes,
+  travel through the existing routed path, and are never retransmitted.
+- TCP establishes a connection with SYN, SYN-ACK, and ACK before data transfer.
+- TCP data packets carry sequence and cumulative acknowledgement numbers.
+- ACKs advance the sender window and are measured using simulation time.
+- Lost TCP data remains unacknowledged until the deterministic RTO timeout;
+  the segment is retransmitted with the same sequence number.
+- Slow start and congestion avoidance update `cwnd` and `ssthresh` from ACKs;
+  a timeout reduces the congestion window and returns the model to slow start.
+- FIN/ACK termination transitions an established connection to `CLOSED`.
+- The Transport Lab displays actual state, ports, sequence/ACK values, flags,
+  windows, RTT, congestion state, packet journey, and simulator drop reasons.
+
+### Example workflow
+
+1. Select `PC1` and open **Transport Lab** in the existing topology workspace.
+2. Choose TCP, select `PC2`, and press **Start Connection**.
+3. Process the handshake, then press **Send Data** and inspect the animated
+   packets and TCP events.
+4. Set a link packet-loss value, send data, and press **Tick** after the timeout
+   to observe retransmission and congestion-window reduction.
+5. Run the deterministic TCP/UDP comparison or select a packet in the
+   **Packet Inspector**.
+
+The simulator remains a classroom model rather than a production TCP/IP stack.
 
 ```
 adaptive-self-healing-network-routing/
@@ -818,7 +853,9 @@ adaptive-self-healing-network-routing/
 ├── test_stage4_5.py       # Stage 4+5 tests
 ├── test_stage6.py         # Stage 6 tests
 ├── test_stage7.py         # Stage 7 infrastructure/protocol tests
-├── test_stage8.py         # Stage 8 diagnostics and packet inspection tests
+├── transport.py           # Simulated TCP/UDP transport model
+├── test_transport.py      # Stage 8 transport tests
+├── test_stage8.py         # Stage 8A diagnostics and packet inspection tests
 ├── test_workspace.py      # Interactive workspace regression tests
 ├── test_lab.py            # Editable lab backend integration tests
 ├── requirements.txt       # Dependencies

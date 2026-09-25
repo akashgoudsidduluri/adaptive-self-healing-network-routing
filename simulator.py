@@ -20,9 +20,10 @@ from qos import (
     normalize_scheduler_name,
     reset_priorities,
 )
-from metrics import Metrics, RecoveryRecord
+from metrics import Metrics, RecoveryRecord, TransportMetrics
 from events import EventLogger, EventType
 from protocols import ProtocolPacket, ProtocolStack, SwitchFrame
+from transport import TransportLayer
 
 
 @dataclass
@@ -113,6 +114,8 @@ class NetworkSimulator:
         self.event_logger = EventLogger()
         # Stage 7 protocol services share the live topology, clock, and events.
         self.protocols = ProtocolStack(self)
+        self.transport_metrics = TransportMetrics()
+        self.transport = TransportLayer(self)
         self.arp = self.protocols.arp
 
         # Heartbeat / health check simulation
@@ -583,6 +586,7 @@ class NetworkSimulator:
             self.time += 0.001
             # Heartbeat check opportunistically
             self.check_heartbeats()
+            self.transport.on_packet_processed(packet)
             return packet
 
         # Detect route change for flow
@@ -717,6 +721,7 @@ class NetworkSimulator:
                     packets_dropped=flow.packets_dropped,
                 )
 
+        self.transport.on_packet_processed(packet)
         return packet
 
     def run(self, steps: int | None = None) -> List[Packet]:
@@ -756,6 +761,7 @@ class NetworkSimulator:
     def tick(self, delta: float = 1.0) -> None:
         """Advance simulation time by delta and check heartbeats."""
         self.time += delta
+        self.transport.process_transport_tick(self.time)
         self.check_heartbeats()
         self.metrics.snapshot(self.time, self.average_congestion(), len(self.active_flows))
 
@@ -1414,6 +1420,39 @@ class NetworkSimulator:
         packet = self.protocols.protocol_packets.get(str(packet_id))
         return self.protocols.packet_details(packet) if packet is not None else None
 
+    def create_tcp_connection(self, *args, **kwargs):
+        return self.transport.create_tcp_connection(*args, **kwargs)
+
+    def create_udp_flow(self, *args, **kwargs):
+        return self.transport.create_udp_flow(*args, **kwargs)
+
+    def send_tcp_data(self, *args, **kwargs):
+        return self.transport.send_tcp_data(*args, **kwargs)
+
+    def send_udp_data(self, *args, **kwargs):
+        return self.transport.send_udp_data(*args, **kwargs)
+
+    def close_tcp_connection(self, *args, **kwargs):
+        return self.transport.close_tcp_connection(*args, **kwargs)
+
+    def process_transport_tick(self, *args, **kwargs):
+        return self.transport.process_transport_tick(*args, **kwargs)
+
+    def get_connection(self, *args, **kwargs):
+        return self.transport.get_connection(*args, **kwargs)
+
+    def get_transport_flows(self):
+        return self.transport.get_transport_flows()
+
+    def get_transport_statistics(self):
+        return self.transport.get_transport_statistics()
+
+    def get_tcp_state(self, *args, **kwargs):
+        return self.transport.get_tcp_state(*args, **kwargs)
+
+    def get_tcp_packet_info(self, *args, **kwargs):
+        return self.transport.get_tcp_packet_info(*args, **kwargs)
+
     def routing_table(self, router_name: str):
         return self.protocols.routing_table(router_name)
 
@@ -1445,6 +1484,7 @@ class NetworkSimulator:
         self.events.clear()
         self.event_logger.clear()
         self.protocols.arp.clear()
+        self.transport.reset()
         self.protocols.routing_tables.clear()
         self.protocols.switch_tables.clear()
         self.protocols.protocol_packets.clear()

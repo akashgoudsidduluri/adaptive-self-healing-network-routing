@@ -145,6 +145,40 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.run_traceroute(
                     str(payload["source"]), str(payload["destination"])
                 )
+            elif action == "transport_create":
+                result = SESSION.create_transport(
+                    str(payload.get("protocol", "TCP")).upper(),
+                    str(payload["source"]),
+                    str(payload["destination"]),
+                    int(payload.get("source_port", 5000)),
+                    int(payload.get("destination_port", 8080)),
+                    int(payload.get("payload_size", 1000)),
+                    int(payload.get("initial_cwnd", 1)),
+                    int(payload.get("receiver_window", 8)),
+                    float(payload.get("ssthresh", 16)),
+                    float(payload.get("timeout", 0.1)),
+                    str(payload.get("traffic_class", "HTTP")),
+                )
+            elif action == "transport_send":
+                result = SESSION.send_transport_data(
+                    str(payload.get("protocol", "TCP")).upper(),
+                    str(payload["flow_id"]),
+                    int(payload.get("packet_count", 1)),
+                    int(payload.get("payload_size", 1000)),
+                )
+            elif action == "transport_close":
+                result = SESSION.close_transport(str(payload["flow_id"]))
+            elif action == "transport_tick":
+                result = SESSION.process_transport_tick(float(payload.get("delta", 0.1)))
+            elif action == "transport_reset":
+                result = SESSION.reset_transport()
+            elif action == "transport_compare":
+                result = SESSION.compare_transport(
+                    str(payload["source"]),
+                    str(payload["destination"]),
+                    int(payload.get("packet_count", 6)),
+                    int(payload.get("payload_size", 1000)),
+                )
             elif action == "arp_table":
                 result = SESSION.inspect_arp(str(payload["id"]))
             elif action == "clear_arp":

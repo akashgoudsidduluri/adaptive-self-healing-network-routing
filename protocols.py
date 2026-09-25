@@ -448,7 +448,7 @@ class ProtocolStack:
         for current, next_hop in zip(packet.route, packet.route[1:]):
             if not self.simulator.topology.active_node(current) or not self.simulator.topology.active_node(next_hop):
                 packet.dropped = True
-                packet.reason = "NODE_DOWN"
+                packet.reason = "DEVICE_DOWN"
                 packet.current_device = current
                 packet.next_hop = next_hop
                 packet.status = "DROPPED"

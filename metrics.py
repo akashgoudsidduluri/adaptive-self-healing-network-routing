@@ -48,6 +48,69 @@ class RecoveryRecord:
     component_type: str = ""  # LINK or NODE
 
 
+class TransportMetrics:
+    """Transport-specific counters layered beside the original metrics."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.records: Dict[str, List[PacketRecord]] = {"TCP": [], "UDP": []}
+        self.retransmissions: Dict[str, int] = {"TCP": 0, "UDP": 0}
+        self.timeouts: Dict[str, int] = {"TCP": 0, "UDP": 0}
+        self.connection_setup_time: Dict[str, float] = {"TCP": 0.0, "UDP": 0.0}
+
+    def record(
+        self,
+        protocol: str,
+        packet_id: int,
+        sent_time: float,
+        delivered_time: float | None,
+        latency: float | None,
+        size: int,
+        status: str,
+        flow_id: str | None = None,
+        route: List[str] | None = None,
+        traffic_type: str | None = None,
+    ) -> None:
+        key = str(protocol).upper()
+        if key not in self.records:
+            return
+        self.records[key].append(
+            PacketRecord(
+                packet_id,
+                sent_time,
+                delivered_time,
+                latency,
+                size,
+                status,
+                flow_id=flow_id,
+                route=route,
+                traffic_type=traffic_type,
+            )
+        )
+
+    def calculate(self, protocol: str, current_time: float, retransmissions: int = 0, timeout_count: int = 0, setup_time: float = 0.0) -> Dict[str, float]:
+        key = str(protocol).upper()
+        records = self.records.get(key, [])
+        delivered = [record for record in records if record.status == "DELIVERED"]
+        dropped = sum(record.status in {"DROPPED", "LOST"} for record in records)
+        latencies = [record.latency for record in delivered if record.latency is not None]
+        duration = max(float(current_time), 0.001)
+        return {
+            "packets_sent": float(len(records)),
+            "packets_delivered": float(len(delivered)),
+            "packets_lost": float(dropped),
+            "packet_delivery_ratio": (len(delivered) / len(records) * 100.0) if records else 100.0,
+            "average_latency": (sum(latencies) / len(latencies)) if latencies else 0.0,
+            "throughput": sum(record.size for record in delivered) / duration,
+            "bytes_transferred": float(sum(record.size for record in delivered)),
+            "retransmissions": float(retransmissions),
+            "timeout_count": float(timeout_count),
+            "connection_setup_time": float(setup_time),
+        }
+
+
 class Metrics:
     def __init__(self) -> None:
         self.records: List[PacketRecord] = []
