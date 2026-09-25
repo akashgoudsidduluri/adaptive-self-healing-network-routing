@@ -650,6 +650,36 @@ class LabSession:
             if device is None:
                 raise LabError(f"Unknown device: {device_name}")
             normalized = " ".join(str(command).strip().split()).lower()
+            if normalized in {"netstat", "netstat -a", "show transport connections", "show transport"}:
+                stats = self.simulator.get_transport_statistics()
+                flows = stats["connections"] + stats["udp_flows"]
+                relevant = [
+                    flow for flow in flows
+                    if device_name in {flow["source"], flow["destination"]}
+                ]
+                if not relevant:
+                    return {
+                        "output": f"No active transport connections on {device_name}.",
+                        "command": command,
+                        "flows": [],
+                    }
+                lines = [
+                    "Proto  Flow ID       Local endpoint          Remote endpoint         State             Retrans  In flight",
+                ]
+                for flow in relevant:
+                    retrans = flow.get("retransmission_count", flow.get("retransmissions", 0))
+                    in_flight = flow.get("packets_in_flight", 0)
+                    lines.append(
+                        f"{flow['protocol']:<5}  {flow['flow_id']:<12}  "
+                        f"{flow['source']}:{flow['source_port']:<15} "
+                        f"{flow['destination']}:{flow['destination_port']:<12} "
+                        f"{flow['state']:<17} {retrans:>7}  {in_flight:>9}"
+                    )
+                return {
+                    "output": "\n".join(lines),
+                    "command": command,
+                    "flows": relevant,
+                }
             if normalized in {"show interfaces", "show interface status"}:
                 lines = [f"{device_name} {device.device_type.upper()}"]
                 lines.extend(f"{i.interface_id}: {i.mac_address} {i.ip_address or 'unassigned'}/{i.prefix} [{i.status}]" for i in device.interfaces)
@@ -726,6 +756,8 @@ class LabSession:
                 "latency": packet.latency,
                 "current_device": packet.destination if packet.delivery_status == "DELIVERED" else packet.source,
                 "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
+                "queue_wait_time": packet.queue_wait_time,
+                "queue_wait_ms": packet.queue_wait_time * 1000 if packet.queue_wait_time is not None else None,
                 "drop_reason": drop_reason,
                 "journey": events,
             }

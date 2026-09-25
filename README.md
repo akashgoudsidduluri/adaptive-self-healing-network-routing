@@ -786,45 +786,81 @@ comes from the live Python routing, protocol, event, and cache state:
 Failed-link and configured packet-loss behavior remains attached to the same
 adaptive routing and self-healing engine used by the rest of NetAdapt.
 
-Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 focused
-tests in `test_stage8.py`; and the editable laboratory adds 14 integration
-tests in `test_lab.py`. The complete repository suite is 174 passing tests.
+Stage 7 adds 20 focused tests in `test_stage7.py`; Stage 8 adds 11 diagnostic
+tests in `test_stage8.py`; the original transport suite adds 31 tests in
+`test_transport.py`; and Stage 9 adds 33 transport acceptance tests in
+`test_stage9.py`. The complete repository suite is 207 passing tests.
 
 
-## Stage 8 — Transport Layer Simulation
+## Stage 9 — TCP + UDP Transport Layer Simulation
 
-Stage 8 adds a deterministic, educational TCP and UDP layer on top of the
+Stage 9 completes a deterministic, educational transport layer on top of the
 existing topology, adaptive router, QoS scheduler, packet-loss model, failure
-detection, and EventLogger. It does not open sockets and does not implement
-application-layer protocols.
+detection, packet animation, diagnostics, and EventLogger. Transport packets
+are ordinary NetAdapt network packets, so every packet still traverses the
+same routing, queueing, loss, congestion, node-failure, and self-healing path.
+No real sockets or Internet connections are used.
 
-### Transport concepts
+### UDP
 
-- UDP is connectionless: packets use source/destination ports and payload sizes,
-  travel through the existing routed path, and are never retransmitted.
-- TCP establishes a connection with SYN, SYN-ACK, and ACK before data transfer.
-- TCP data packets carry sequence and cumulative acknowledgement numbers.
-- ACKs advance the sender window and are measured using simulation time.
-- Lost TCP data remains unacknowledged until the deterministic RTO timeout;
-  the segment is retransmitted with the same sequence number.
-- Slow start and congestion avoidance update `cwnd` and `ssthresh` from ACKs;
-  a timeout reduces the congestion window and returns the model to slow start.
-- FIN/ACK termination transitions an established connection to `CLOSED`.
-- The Transport Lab displays actual state, ports, sequence/ACK values, flags,
-  windows, RTT, congestion state, packet journey, and simulator drop reasons.
+- Connectionless flows use source/destination ports, payload size, packet ID,
+  flow ID, and an existing traffic class (VoIP by default).
+- Delivery, loss, latency, throughput, delivery ratio, and bytes transferred
+  are measured from processed simulation packets.
+- Lost UDP packets remain lost and are never retransmitted.
+
+### TCP
+
+- SYN, SYN-ACK, and final ACK packets perform the three-way handshake and move
+  the connection from `CLOSED` through `SYN_SENT` and `SYN_RECEIVED` to
+  `ESTABLISHED`.
+- Data packets carry sequence numbers, cumulative ACK numbers, payload size,
+  ports, flags, and the receiver-advertised window.
+- The sender enforces `effective_window = min(cwnd, receiver_window)`, tracks
+  packets/bytes in flight, highest ACK, and next sequence number, and never
+  sends beyond the effective window.
+- ACKs use the NetAdapt simulation clock. Current, average, minimum, and
+  maximum RTT are derived from the original data-segment send time, including
+  after a retransmission.
+- Lost data remains outstanding until its deterministic RTO expires. Timeout,
+  congestion response, and retransmission events are generated from the live
+  simulation, and the retransmission keeps the original sequence number.
+- Slow start increases `cwnd` by one per newly acknowledged window. Congestion
+  avoidance uses slower additive growth after `ssthresh`. A timeout reduces
+  `cwnd`, halves `ssthresh` (with a minimum of two), and returns to slow start.
+- FIN/ACK four-way termination passes through the real simulated packets and
+  records `FIN_WAIT`, `CLOSE_WAIT`, `LAST_ACK`, `TIME_WAIT`, and `CLOSED`.
+
+### Routing, QoS, inspection, and CLI integration
+
+- Forward transport packets use the live AdaptiveRouter. A route change updates
+  the flow route/history and writes `ROUTE_RECALCULATED` to the event timeline.
+- TCP uses `HTTP` and UDP uses `VoIP` by default, so existing FIFO, Priority,
+  and WFQ scheduling still controls service order and queue waiting time.
+- Packet animation distinguishes control, data, ACK, UDP, dropped, and
+  retransmission packets using actual simulator packet metadata.
+- The existing Packet Inspector displays protocol, endpoints, ports, flags,
+  sequence/ACK values, window, traffic class, route, queue wait, journey, and
+  simulator drop reason.
+- `netstat` and `show transport` in the device console query the same live flow
+  state as the Transport Lab.
 
 ### Example workflow
 
-1. Select `PC1` and open **Transport Lab** in the existing topology workspace.
-2. Choose TCP, select `PC2`, and press **Start Connection**.
-3. Process the handshake, then press **Send Data** and inspect the animated
-   packets and TCP events.
-4. Set a link packet-loss value, send data, and press **Tick** after the timeout
-   to observe retransmission and congestion-window reduction.
-5. Run the deterministic TCP/UDP comparison or select a packet in the
-   **Packet Inspector**.
+1. Open the existing **Self-Healing Demo** or build a topology with two hosts.
+2. Select a source and open **Transport Lab** in the diagnostic toolbar.
+3. Choose TCP, set ports/payload/CWND/receiver window/SSTHRESH/timeout, and
+   press **Start Connection**. The real SYN/SYN-ACK/ACK packets animate.
+4. Press **Send Data**, then inspect the live state, RTT, windows, ACKs,
+   congestion phase, packet journey, and event timeline.
+5. Set a route link to 100% packet loss or fail a link. Press **Advance 100 ms**
+   to trigger timeout/retransmission or observe the flow move to a new route.
+6. Switch to UDP and send the same payload. UDP loss is recorded without a
+   retransmission. Run **TCP vs UDP comparison** for deterministic side-by-side
+   metrics from cloned topology and network conditions.
 
-The simulator remains a classroom model rather than a production TCP/IP stack.
+The model is intentionally educational: it implements the core TCP/UDP state
+and reliability concepts but not every production TCP option or OS behavior.
 
 ```
 adaptive-self-healing-network-routing/
@@ -854,8 +890,9 @@ adaptive-self-healing-network-routing/
 ├── test_stage6.py         # Stage 6 tests
 ├── test_stage7.py         # Stage 7 infrastructure/protocol tests
 ├── transport.py           # Simulated TCP/UDP transport model
-├── test_transport.py      # Stage 8 transport tests
-├── test_stage8.py         # Stage 8A diagnostics and packet inspection tests
+├── test_transport.py      # Core transport regression tests
+├── test_stage9.py         # Stage 9 TCP/UDP acceptance tests
+├── test_stage8.py         # Diagnostics and packet inspection tests
 ├── test_workspace.py      # Interactive workspace regression tests
 ├── test_lab.py            # Editable lab backend integration tests
 ├── requirements.txt       # Dependencies
