@@ -290,9 +290,7 @@ function bindServicesLab(){
       if(action==='toggle-flood-protection')await api('security_configure',{values:{flood_protection:!(state.security?.flood?.protection_enabled)}});
       if(action==='arp-spoof')await api('arp_spoof',{attacker:value('arpAttacker'),victim:value('arpVictim'),detect:true});
       if(action==='flood-start')await api('flood_start',{attacker:value('arpAttacker'),target:value('arpVictim'),protocol:value('floodProtocol','UDP'),rate:Number(value('floodRate','200')),duration:Number(value('floodDuration','1')),threshold:Number(value('floodThreshold','100'))});
-      servicesView=true;renderInspector();
-    }catch(error){}
-  }));
+      servicesView=true;renderInspector();}catch(error){toast(error.message || 'Services action failed.',true);}}));
 }
 function bindTransportLab(){
   inspectorBody.querySelectorAll('[data-transport-action]').forEach(button=>button.addEventListener('click',async()=>{
@@ -310,7 +308,7 @@ function bindTransportLab(){
       if(action==='reset')await api('transport_reset');
       if(action==='compare')await api('transport_compare',{source,destination,packet_count:6,payload_size:payload});
       transportView=true;renderInspector();
-    }catch(error){}
+    }catch(error){toast(error.message || 'Transport action failed.',true);}
   }));
   $('transportProtocol')?.addEventListener('change',()=>{transportProtocol=$('transportProtocol').value;transportView=true;renderInspector();});
   $('transportSource')?.addEventListener('change',()=>{transportView=true;renderInspector();});
@@ -320,7 +318,7 @@ function labSettings(){
   const routing=state.routing||{},qos=state.qos||{},weights=routing.weights||{},classes=Object.keys(qos.priorities||{});
   const routingFields=Object.entries(weights).map(([name,value])=>`<label>${esc(name)}<input data-routing-weight="${esc(name)}" type="number" min="0" step="0.1" value="${value}"/></label>`).join('');
   const classFields=classes.map(name=>`<div class="policy-row"><b>${esc(name)}</b><label>Priority<input data-priority="${esc(name)}" type="number" step="0.1" value="${qos.priorities[name]}"/></label><label>WFQ weight<input data-weight="${esc(name)}" type="number" min="0.1" step="0.1" value="${(qos.weights||{})[name]||1}"/></label></div>`).join('');
-  return `<div class="device-hero"><div class="device-symbol">⚙</div><div><b>Lab policies</b><span>Live engine configuration</span></div></div><div class="inspector-section"><div class="section-title">Routing</div><label>Algorithm<select id="routingAlgorithm"><option value="dijkstra" ${routing.algorithm==='dijkstra'?'selected':''}>Dijkstra</option><option value="bellman-ford" ${routing.algorithm==='bellman-ford'?'selected':''}>Bellman–Ford</option></select></label><div class="policy-grid">${routingFields}</div><button data-action="apply-routing">Apply routing policy</button></div><div class="inspector-section"><div class="section-title">Quality of Service</div><label>Scheduler<select id="schedulerSelect"><option value="fifo" ${qos.scheduler==='fifo'?'selected':''}>FIFO</option><option value="priority" ${qos.scheduler==='priority'?'selected':''}>Priority Queue</option><option value="wfq" ${qos.scheduler==='wfq'?'selected':''}>Weighted Fair Queuing</option></select></label><div class="policy-list">${classFields}</div><button data-action="apply-qos">Apply QoS policy</button></div>`;
+  return `<div class="device-hero"><div class="device-symbol">⚙</div><div><b>Lab policies</b><span>Live engine configuration</span></div></div><div class="inspector-section"><div class="section-title">Routing</div><label>Algorithm<select id="routingAlgorithm"><option value="dijkstra" ${routing.algorithm==='dijkstra'?'selected':''}>Dijkstra</option><option value="bellman_ford" ${routing.algorithm==='bellman_ford'?'selected':''}>Bellman–Ford</option></select></label><div class="policy-grid">${routingFields}</div><button data-action="apply-routing">Apply routing policy</button></div><div class="inspector-section"><div class="section-title">Quality of Service</div><label>Scheduler<select id="schedulerSelect"><option value="fifo" ${qos.scheduler==='fifo'?'selected':''}>FIFO</option><option value="priority" ${qos.scheduler==='priority'?'selected':''}>Priority Queue</option><option value="wfq" ${qos.scheduler==='wfq'?'selected':''}>Weighted Fair Queuing</option></select></label><div class="policy-list">${classFields}</div><button data-action="apply-qos">Apply QoS policy</button></div>`;
 }
 function learningInspector(){
   const learning=state.learning||{},categories=learning.categories||[],result=learning.result,mode=learning.step_mode||{};
