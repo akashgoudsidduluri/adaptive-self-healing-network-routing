@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, Tuple
 import networkx as nx
 
 
@@ -14,10 +14,30 @@ class Link:
     status: str = "UP"
 
 
+# Fixed layout for visualization consistency
+DEFAULT_POSITIONS: Dict[str, Tuple[float, float]] = {
+    "H1": (-2.5, 1.5),
+    "H2": (-2.5, -1.5),
+    "H3": (2.5, 1.5),
+    "H4": (2.5, -1.5),
+    "R1": (-1.5, 0.8),
+    "R2": (-1.5, -0.8),
+    "R3": (-0.3, 0.8),
+    "R4": (-0.3, -0.8),
+    "R5": (1.2, 0.8),
+    "R6": (1.2, -0.8),
+}
+
+
 class NetworkTopology:
     def __init__(self) -> None:
         self.graph = nx.Graph()
         self._build_default_topology()
+        # Store original bandwidth for reset and bandwidth reduction tracking
+        self._original_bandwidth: Dict[Tuple[str, str], float] = {}
+        for u, v, data in self.graph.edges(data=True):
+            key = tuple(sorted((u, v)))
+            self._original_bandwidth[key] = data.get("bandwidth", 100.0)
 
     def _build_default_topology(self) -> None:
         nodes = [
@@ -78,7 +98,12 @@ class NetworkTopology:
             packet_loss=float(packet_loss),
             congestion=float(congestion),
             status="UP",
+            original_bandwidth=float(bandwidth),
         )
+        key = tuple(sorted((u, v)))
+        if not hasattr(self, '_original_bandwidth'):
+            self._original_bandwidth = {}
+        self._original_bandwidth[key] = float(bandwidth)
 
     def remove_link(self, u: str, v: str) -> None:
         if self.graph.has_edge(u, v):
@@ -116,6 +141,20 @@ class NetworkTopology:
     def set_packet_loss(self, u: str, v: str, value: float) -> None:
         self.update_link(u, v, packet_loss=max(0.0, min(1.0, value)))
 
+    def set_bandwidth(self, u: str, v: str, value: float) -> None:
+        """Set bandwidth in Mbps, clamped to minimum 0.1 Mbps."""
+        clamped = max(0.1, float(value))
+        self.update_link(u, v, bandwidth=clamped)
+
+    def get_link(self, u: str, v: str) -> Dict[str, Any] | None:
+        if self.graph.has_edge(u, v):
+            return dict(self.graph[u][v])
+        return None
+
+    def get_original_bandwidth(self, u: str, v: str) -> float:
+        key = tuple(sorted((u, v)))
+        return self._original_bandwidth.get(key, 100.0)
+
     def active_node(self, node: str) -> bool:
         return (
             node in self.graph
@@ -147,10 +186,14 @@ class NetworkTopology:
         for _, data in self.graph.nodes(data=True):
             data["status"] = "UP"
 
-        for _, _, data in self.graph.edges(data=True):
+        for u, v, data in self.graph.edges(data=True):
             data["status"] = "UP"
             data["packet_loss"] = 0.0
             data["congestion"] = 0.0
+            # Restore original bandwidth
+            key = tuple(sorted((u, v)))
+            orig = self._original_bandwidth.get(key, data.get("original_bandwidth", 100.0))
+            data["bandwidth"] = orig
 
     def nodes(self) -> list[str]:
         return list(self.graph.nodes)
@@ -167,3 +210,26 @@ class NetworkTopology:
                 self.active_link(u, v) for u, v in self.graph.edges
             ),
         }
+
+    def get_positions(self) -> Dict[str, Tuple[float, float]]:
+        """Return fixed positions for visualization."""
+        # Use default positions for known nodes, spring layout for others
+        pos = {}
+        for node in self.graph.nodes:
+            if node in DEFAULT_POSITIONS:
+                pos[node] = DEFAULT_POSITIONS[node]
+        # For any extra nodes, use spring layout as fallback
+        if len(pos) < self.graph.number_of_nodes():
+            try:
+                spring = nx.spring_layout(self.graph, seed=42)
+                for node in self.graph.nodes:
+                    if node not in pos:
+                        pos[node] = tuple(spring[node])
+            except Exception:
+                for node in self.graph.nodes:
+                    if node not in pos:
+                        pos[node] = (0.0, 0.0)
+        return pos
+
+    def link_uses_node(self, link: Tuple[str, str], node: str) -> bool:
+        return node in link
