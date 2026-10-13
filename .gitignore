@@ -49,3 +49,6 @@ build/
 # Temporary files
 *.tmp
 *.temp
+
+# NodeModules
+node_modules

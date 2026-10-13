@@ -16,7 +16,7 @@ import mimetypes
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 from urllib.parse import urlparse
 
 from lab_session import LabError, LabSession
@@ -57,8 +57,25 @@ class LabHandler(BaseHTTPRequestHandler):
             from lab_session import PRESETS
             self._json({"presets": [{"key": key, "name": value["name"]} for key, value in PRESETS.items()]})
             return
-        relative = "index.html" if path in {"/", ""} else path.lstrip("/")
-        target = (FRONTEND / relative).resolve()
+        # 1. Root route: NetAdapt Landing Page
+        if path in {"/", ""}:
+            target = (FRONTEND / "landing.html").resolve()
+        # 2. Simulation Lab routes
+        elif path in {"/lab", "/lab/"}:
+            target = (FRONTEND / "index.html").resolve()
+        # 3. Dedicated landing page assets
+        elif path.startswith("/home-assets/"):
+            relative = path[len("/home-assets/"):].lstrip("/")
+            home_assets = FRONTEND / "home-assets"
+            target = (home_assets / relative).resolve()
+        # 4. Lab assets and files
+        else:
+            clean = path
+            if clean.startswith("/lab/"):
+                clean = clean[5:]
+            relative = clean.lstrip("/")
+            target = (FRONTEND / relative).resolve()
+
         if FRONTEND not in target.parents and target != FRONTEND:
             self._json({"error": "Forbidden"}, 403)
             return

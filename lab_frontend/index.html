@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>NetAdapt Network Laboratory</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -48,7 +51,7 @@
       </aside>
 
       <main class="canvas-panel">
-        <div class="canvas-header"><div><span class="eyebrow">TOPOLOGY WORKSPACE</span><h1 id="topologyName">Self-Healing Demo</h1></div><div class="canvas-actions"><button id="fitBtn">⌗ Fit</button><label class="toggle"><input id="gridToggle" type="checkbox" checked /> Grid</label><label class="toggle"><input id="snapToggle" type="checkbox" checked /> Snap</label></div></div>
+        <div class="canvas-header"><div><span class="eyebrow">TOPOLOGY WORKSPACE</span><h1 id="topologyName">Self-Healing Demo</h1></div><div class="canvas-actions"><button id="fitBtn">⌗ Fit</button><label class="toggle"><input id="gridToggle" type="checkbox" checked /> Grid</label><label class="toggle"><input id="snapToggle" type="checkbox" checked /> Snap</label><button id="toggleInspectorBtn" title="Toggle Inspector panel">⚙ Inspector</button></div></div>
         <div class="diagnostic-toolbar">
           <span class="diagnostic-source">Source: <b id="diagnosticSource">select a device</b></span>
           <label>Destination <select id="diagnosticDestination"><option>select a destination</option></select></label>
@@ -68,7 +71,7 @@
         <div class="workspace-controls" aria-label="Simulation controls"><span class="eyebrow">SIMULATION CONTROLS</span><button data-workspace-control="play">▶ Play</button><button data-workspace-control="pause">Ⅱ Pause</button><button data-workspace-control="step">⇥ Step</button><button data-workspace-control="stop">■ Stop</button><button data-workspace-control="reset">↻ Reset</button><label>Speed<select id="workspaceSpeed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="5">5×</option><option value="10">10×</option></select></label></div>
         <div class="canvas-wrap" id="canvasWrap">
           <svg id="networkCanvas" viewBox="0 0 1200 680" role="application" aria-label="Editable network topology canvas">
-            <defs><pattern id="gridPattern" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" stroke="#172638" stroke-width="1" /></pattern><filter id="nodeShadow"><feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#000" flood-opacity=".45" /></filter><filter id="packetGlow"><feGaussianBlur stdDeviation="3" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
+            <defs><pattern id="gridPattern" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" stroke="#F1F5F9" stroke-width="0.8" /></pattern><filter id="nodeShadow"><feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000" flood-opacity=".12" /></filter><filter id="packetGlow"><feGaussianBlur stdDeviation="2" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
             <rect id="gridRect" x="0" y="0" width="1200" height="680" fill="url(#gridPattern)" />
             <g id="linkLayer"></g><g id="routeLayer"></g><g id="nodeLayer"></g><g id="packetLayer"></g><path id="connectPreview" class="connect-preview" d="" />
           </svg>
