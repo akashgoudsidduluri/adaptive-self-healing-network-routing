@@ -69,7 +69,14 @@ function linkMarkup(link, active) {
 }
 function routeEdges() {
   const edges=new Set();
-  for (const flow of state.flows || []) for (let i=0;i<(flow.route||[]).length-1;i++) edges.add(key(flow.route[i],flow.route[i+1]));
+  // The blue "active route" glow is drawn only while traffic is genuinely in
+  // flight.  Finished flows stay in state.flows (status COMPLETED/FAILED) as
+  // history, so they are excluded here: once the queue is empty and no packet
+  // is queued or moving, the highlight disappears from the canvas.
+  for (const flow of state.flows || []) {
+    if (flow.status !== 'ACTIVE') continue;
+    for (let i=0;i<(flow.route||[]).length-1;i++) edges.add(key(flow.route[i],flow.route[i+1]));
+  }
   for (const packet of state.packets || []) if (['ACTIVE','PENDING'].includes(packet.status) && packet.route?.length>1) for (let i=0;i<packet.route.length-1;i++) edges.add(key(packet.route[i],packet.route[i+1]));
   return edges;
 }
@@ -96,12 +103,12 @@ function renderCanvas() {
   $('statSent').textContent=Math.round(state.metrics.sent); $('statDelivered').textContent=Math.round(state.metrics.delivered); $('statDropped').textContent=Math.round(state.metrics.dropped); $('statPdr').textContent=`${fmt(state.metrics.pdr,1)}%`; $('statLatency').textContent=`${fmt(state.metrics.latency,1)} ms`; $('statRouteChanges').textContent=state.metrics.route_changes;
   const q=state.queue||{}; $('queueLength').textContent=`${Math.round(q.length||0)} packets`; $('queueWait').textContent=`${fmt((q.average_wait||0)*1000,1)} ms average wait`; $('flowCount').textContent=`${state.flows?.length||0} active flows`; const summary=$('simulationSummary'); if(summary) summary.textContent=state.metrics.sent?`${state.running?'SIMULATION RUNNING':'SIMULATION COMPLETE'} · ${Math.round(state.metrics.sent)} sent · ${Math.round(state.metrics.delivered)} delivered · ${Math.round(state.metrics.dropped)} dropped · PDR ${fmt(state.metrics.pdr,1)}% · ${fmt(state.metrics.latency,1)} ms avg`:'Idle · no packets sent'; $('queueBar').style.width=`${Math.min(100,(q.length||0)*10)}%`;
   const packets=state.packets||[];
-  if(!packets.length){seenPacketIds.clear();packetLayer.innerHTML='';routeLayer.innerHTML='';}
+  const topology=topologyGeneration();
+  if(!packets.length||topology!==packetAnimator.generation){seenPacketIds.clear();routeLayer.innerHTML='';packetAnimator.clearAll(topology);}
   packets.forEach(packet=>{const packetKey=String(packet.id);if(!seenPacketIds.has(packetKey)){seenPacketIds.add(packetKey);animatePacket(packet);}});
   renderDiagnosticToolbar();
   $('undoBtn').disabled=!state.can_undo; $('redoBtn').disabled=!state.can_redo;
   $('playBtn').classList.toggle('primary',state.running);
-  if($('workspaceSpeed')&&$('workspaceSpeed').value!==String(state.speed??1))$('workspaceSpeed').value=String(state.speed??1);
   if($('speedSelect')&&$('speedSelect').value!==String(state.speed??1))$('speedSelect').value=String(state.speed??1);
 }
 function renderTimeline() {
@@ -115,7 +122,7 @@ function bindNode(el) {
   el.addEventListener('pointerdown',(e)=>{
     e.stopPropagation();
     if(mode==='delete') { api('delete_device',{id}); return; }
-    if(mode==='connect') { if(!connectStart) {connectStart=id;toast(`Connect from ${id}`);} else if(connectStart!==id) { const from=connectStart;connectStart=null;api('add_link',{source:from,target:id}); } return; }
+    if(mode==='connect') { if(!connectStart) {connectStart=id;toast(`Connect from ${id}`);} else if(connectStart!==id) { const from=connectStart;connectStart=null;api('add_link',{source:from,target:id}); } connectPreview.setAttribute('d',''); return; }
     if(e.button!==0) return;
     const point=canvasPoint(e); drag={id,dx:point.x-state.devices.find(d=>d.id===id).x,dy:point.y-state.devices.find(d=>d.id===id).y,moved:false}; el.setPointerCapture?.(e.pointerId); selected={kind:'device',id}; diagnosticView=false; transportView=false; renderInspector();
   });
@@ -124,12 +131,220 @@ function bindNode(el) {
   el.addEventListener('click',(e)=>{e.stopPropagation();if(mode==='select'&&!drag){selected={kind:'device',id};diagnosticView=false;renderInspector();}});
 }
 function canvasPoint(event) { const point=canvas.createSVGPoint(); point.x=event.clientX;point.y=event.clientY; return point.matrixTransform(canvas.getScreenCTM().inverse()); }
+// ---------------------------------------------------------------------------
+// Packet animation layer
+//
+// Everything in this block only *renders* packet records the simulator already
+// produced: the route, the endpoints and the drop reason always come from the
+// backend.  Nothing here advances the simulation, invents a route, or touches a
+// metric.  Every marker, trail, timer and animation frame is registered in
+// `packetAnimator`, so reset or a topology switch tears the layer down
+// completely and immediately - no element and no callback can survive it.
+//
+// Browser animation time is deliberately separate from simulated time: a hop is
+// drawn over a readable base time scaled by the live `speed` control, and the
+// *relative* duration of each hop follows that hop's simulated latency, so a
+// slow link visibly takes longer than a fast one.  The route, the ordering and
+// the outcome are never approximated - they are the engine's own values.
+// ---------------------------------------------------------------------------
+const PACKET_HOP_MS = 800;          // base visual time for one hop at 1x speed (slow, readable)
+const PACKET_MARKER_LINGER = 1200;  // ms a finished marker stays on screen
+const PACKET_MARKER_LIMIT = 60;     // concurrent packets kept on screen at once
+const PACKET_TRAIL_FRACTION = 0.6;  // fraction of the current hop drawn as a trail
+
+const packetAnimator = {
+  generation: null,
+  entries: new Map(),
+  timers: new Set(),
+  frame: null,
+  now() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); },
+  /** A timer that clearAll() cancels. */
+  later(fn, ms) { const id = setTimeout(() => { this.timers.delete(id); fn(); }, ms); this.timers.add(id); return id; },
+  add(entry) {
+    this.entries.set(String(entry.packet.id), entry);
+    const keys = [...this.entries.keys()];
+    while (keys.length > PACKET_MARKER_LIMIT) this.remove(keys.shift());
+    // Departure stagger: a packet that is about to move waits briefly at its
+    // source so a group forms and drifts down the route instead of every
+    // packet launching on the same frame and reading as one streak.  The wait
+    // is applied by shifting `started`, so the rAF loop simply sees a negative
+    // elapsed time and holds the marker at the source until it is due - the
+    // entry stays in `entries` the whole time and is removed normally when it
+    // finishes and its linger expires.
+    if (!entry.done) {
+      const inFlight = [...this.entries.values()].filter(other => other !== entry && !other.done).length;
+      if (inFlight > 0) entry.started += Math.min(1200, inFlight * 120);
+    }
+    this.loop();
+  },
+  remove(key) {
+    const entry = this.entries.get(key);
+    if (!entry) return;
+    this.entries.delete(key);
+    if (entry.trail) { entry.trail.remove(); entry.trail = null; }
+    if (entry.element) entry.element.remove();
+  },
+  /** Remove every marker, trail, animation frame and pending callback. */
+  clearAll(generation = null) {
+    if (generation !== null) this.generation = generation;
+    for (const key of [...this.entries.keys()]) this.remove(key);
+    for (const id of this.timers) { clearTimeout(id); clearInterval(id); }
+    this.timers.clear();
+    if (this.frame !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.frame);
+    this.frame = null;
+    // Frontend-only cleanup: the packet layer is a pure visual surface.  When
+    // the queue is empty we clear it so nothing (no leftover marker, no hidden
+    // route path) stays on screen.  Backend packet history and metrics are
+    // untouched - this only removes what the browser rendered while animating.
+    packetLayer.innerHTML = '';
+  },
+  loop() {
+    if (this.frame === null && typeof requestAnimationFrame === 'function') this.frame = requestAnimationFrame(() => this.tick());
+  },
+  tick() {
+    this.frame = null;
+    const now = this.now();
+    for (const [key, entry] of [...this.entries]) {
+      if (entry.generation !== this.generation) { this.remove(key); continue; }
+      if (entry.done) { if (now >= entry.expires) this.remove(key); continue; }
+      let elapsed = now - entry.started;
+      while (entry.hop < entry.hops.length && elapsed >= entry.hops[entry.hop].duration) {
+        elapsed -= entry.hops[entry.hop].duration;
+        entry.hop += 1;
+      }
+      if (entry.hop >= entry.hops.length) { this.finish(key, entry); continue; }
+      const hop = entry.hops[entry.hop];
+      const t = hop.duration > 0 ? Math.max(0, Math.min(1, elapsed / hop.duration)) : 1;
+      const x = hop.x1 + (hop.x2 - hop.x1) * t, y = hop.y1 + (hop.y2 - hop.y1) * t;
+      entry.element.setAttribute('transform', `translate(${x.toFixed(1)},${y.toFixed(1)})`);
+      // Redraw the trail to the packet's actual current position so the
+      // visible streak stays exactly where the packet is (the HTML/CSS
+      // background-stripe bug this replaced had trails drifting behind the marker).
+      if (entry.trail) {
+        const from = Math.max(0, t - PACKET_TRAIL_FRACTION);
+        entry.trail.setAttribute('x1', (hop.x1 + (hop.x2 - hop.x1) * from).toFixed(1));
+        entry.trail.setAttribute('y1', (hop.y1 + (hop.y2 - hop.y1) * from).toFixed(1));
+        entry.trail.setAttribute('x2', x.toFixed(1));
+        entry.trail.setAttribute('y2', y.toFixed(1));
+        entry.trail.setAttribute('stroke-opacity', (t <= 0 || t >= 1) ? '0' : '0.4');
+      }
+    }
+    if (this.entries.size) this.loop();
+  },
+  finish(key, entry) {
+    entry.done = true;
+    entry.expires = this.now() + PACKET_MARKER_LINGER;
+    if (entry.trail) { entry.trail.remove(); entry.trail = null; }
+    if (!entry.element) return;
+    entry.element.setAttribute('transform', `translate(${entry.end.x.toFixed(1)},${entry.end.y.toFixed(1)})`);
+    entry.element.classList.add(entry.outcomeClass);
+    if (entry.outcomeClass === 'delivered' && entry.pulse) entry.pulse.classList.add('show');
+  },
+};
+if (typeof window !== 'undefined') window.NetAdaptPackets = packetAnimator;
+
+function topologyGeneration() {
+  if (!state) return 'none';
+  const devices = (state.devices || []).map(d => d.id).join(',');
+  const links = (state.links || []).map(l => `${l.source}>${l.target}`).join(',');
+  return `${state.name}|${devices}|${links}`;
+}
+function packetMarker(packet, color, label, markerClass) {
+  const group = document.createElementNS(SVG_NS, 'g');
+  group.setAttribute('class', `packet ${markerClass}`.trim());
+  group.setAttribute('data-packet', String(packet.id));
+  group.setAttribute('style', `color:${color}`);
+  const pulse = document.createElementNS(SVG_NS, 'circle');
+  pulse.setAttribute('class', 'packet-pulse');
+  pulse.setAttribute('r', '4');
+  const ring = document.createElementNS(SVG_NS, 'circle');
+  ring.setAttribute('class', 'packet-ring');
+  ring.setAttribute('r', '6');
+  const core = document.createElementNS(SVG_NS, 'circle');
+  core.setAttribute('class', 'packet-core');
+  core.setAttribute('r', '2.4');
+  const text = document.createElementNS(SVG_NS, 'text');
+  text.setAttribute('class', 'packet-label');
+  text.setAttribute('y', '-11');
+  text.textContent = label;
+  group.append(pulse, ring, core, text);
+  return { group, ring, core, pulse, text };
+}
+function packetTrail(color) {
+  const line = document.createElementNS(SVG_NS, 'line');
+  line.setAttribute('class', 'packet-trail');
+  line.setAttribute('stroke', color);
+  line.setAttribute('stroke-opacity', '0');
+  return line;
+}
 function animatePacket(packet) {
-  const route=packet.route||[]; const sourceDevice=state.devices.find(d=>d.id===packet.source); if(!sourceDevice)return; if(packet.status==='DROPPED'||route.length<2){const markerId=`packetDrop-${packet.id}-${Date.now()}`; const reason=packet.drop_reason||packet.reason|| (route.length<2?'NO_ROUTE':'DROPPED'); packetLayer.insertAdjacentHTML('beforeend',`<g id="${markerId}" class="packet dropped" data-packet="${packet.id}" style="color:#f16c7a" transform="translate(${sourceDevice.x},${sourceDevice.y})"><circle class="packet-ring" r="8"/><circle class="packet-core" r="3"/><text class="packet-label" y="-13">P${packet.id} ${esc(reason)}</text></g>`); packetLayer.querySelector(`[data-packet="${CSS.escape(String(packet.id))}"]`)?.addEventListener('click',()=>{selected={kind:'packet',data:packet};diagnosticView=false;transportView=false;renderInspector();}); setTimeout(()=>document.getElementById(markerId)?.remove(),2600); return;} const points=route.map(id=>state.devices.find(d=>d.id===id)).filter(Boolean); if(points.length<2)return;
-  const id=`packetPath-${packet.id}-${Date.now()}`; const d=points.map((p,i)=>`${i?'L':'M'} ${p.x} ${p.y}`).join(' '); const trafficClass=packet.traffic_class||packet.traffic_type; const kind=packet.kind||'DATA'; const protocol=packet.protocol||'IP'; const color=packet.status==='DROPPED'?'#f16c7a':protocol==='TCP'?(kind==='ACK'?'#bb9cff':kind==='CONTROL'||kind==='FIN'?'#f3bf5b':'#56d9e8'):protocol==='UDP'?'#5ca9ff':COLORS[trafficClass]||'#56d9e8'; const retransmission=Number(packet.retransmission||0); const transportClass=protocol==='TCP'?`transport tcp-${kind.toLowerCase()}`:protocol==='UDP'?'transport udp-data':''; const stateClass=`${packet.status==='DROPPED'?'dropped ':''}${retransmission?'retransmission':''}`; const label=protocol==='TCP'?`${protocol} ${(packet.flags||[]).join('+')||kind}${retransmission?' ↻'+retransmission:''}`:protocol==='UDP'?`${protocol} DATA`:`P${packet.id}`;
-  packetLayer.insertAdjacentHTML('beforeend',`<path id="${id}" d="${d}" fill="none" stroke="none"/><g class="packet ${transportClass} ${stateClass}" data-packet="${packet.id}" style="color:${color}"><circle class="packet-ring" r="8"/><circle class="packet-core" r="3"/><text class="packet-label" y="-13">${esc(label)}</text><animateMotion dur="${Math.max(900,route.length*430)}ms" repeatCount="1" fill="freeze"><mpath href="#${id}"/></animateMotion></g>`);
-  packetLayer.querySelector(`[data-packet="${CSS.escape(String(packet.id))}"]`)?.addEventListener('click',()=>{selected={kind:'packet',data:packet};diagnosticView=false;transportView=false;renderInspector();});
-  setTimeout(()=>{const el=document.getElementById(id);if(el)el.remove();},Math.max(1000,route.length*430)+300);
+  if (!state || !packetAnimator.generation) return;
+  const devices = state.devices || [];
+  const sourceDevice = devices.find(d => d.id === packet.source);
+  if (!sourceDevice) return;
+  const deviceById = (id) => devices.find(d => d.id === id);
+  const route = (packet.route || []).filter(Boolean);
+  const trafficClass = packet.traffic_class || packet.traffic_type;
+  const kind = packet.kind || 'DATA';
+  const protocol = packet.protocol || 'IP';
+  const color = packet.status === 'DROPPED' ? '#f16c7a' : protocol === 'TCP' ? (kind === 'ACK' ? '#bb9cff' : kind === 'CONTROL' || kind === 'FIN' ? '#f3bf5b' : '#56d9e8') : protocol === 'UDP' ? '#5ca9ff' : (COLORS[trafficClass] || '#56d9e8');
+  const retransmission = Number(packet.retransmission || 0);
+  const transportClass = protocol === 'TCP' ? `transport tcp-${String(kind).toLowerCase()}` : protocol === 'UDP' ? 'transport udp-data' : '';
+  const stateClass = `${packet.status === 'DROPPED' ? 'dropped' : ''}${retransmission ? ' retransmission' : ''}`.trim();
+  const baseLabel = protocol === 'TCP' ? `${protocol} ${(packet.flags || []).join('+') || kind}${retransmission ? ' ↻' + retransmission : ''}` : protocol === 'UDP' ? `${protocol} DATA` : `P${packet.id}`;
+  const engineReason = packet.drop_reason || packet.reason || null;
+
+  // Walk the engine's own route one real link at a time.  A hop whose link is
+  // missing or DOWN stops the packet where it really stopped, carrying the
+  // engine's own reason, so nothing is ever animated across a link that does
+  // not exist or has failed.
+  const hops = [];
+  let failure = route.length < 2 ? { device: sourceDevice, reason: engineReason || 'NO_ROUTE' } : null;
+  if (!failure) {
+    const speed = Math.max(0.25, Number(state.speed || 1));
+    for (let i = 0; i < route.length - 1; i += 1) {
+      const from = deviceById(route[i]), to = deviceById(route[i + 1]);
+      const link = (from && to) ? (state.links || []).find(l => key(l.source, l.target) === key(route[i], route[i + 1])) : null;
+      if (!from || !to || !link || link.status === 'DOWN') {
+        failure = { device: from || (hops.length ? deviceById(hops[hops.length - 1].to) : sourceDevice) || sourceDevice, reason: engineReason || (link && link.status === 'DOWN' ? 'LINK_DOWN' : 'NO_ROUTE') };
+        break;
+      }
+      // Slow and readable: a hop is drawn over PACKET_HOP_MS (0.8s at 1x),
+      // stretched by the link's simulated latency so a slow link visibly takes
+      // longer than a fast one.  Combined with the departure stagger in add(),
+      // a stream of packets reads as a group drifting hop-by-hop down the route.
+      const latencyFactor = 1 + Math.min(1, Math.max(0, Number(link.latency || 0)) / 50);
+      hops.push({ x1: from.x, y1: from.y, x2: to.x, y2: to.y, to: to.id, duration: Math.max(120, Math.round(PACKET_HOP_MS * latencyFactor / speed)) });
+    }
+    if (!failure && !hops.length) failure = { device: sourceDevice, reason: engineReason || 'NO_ROUTE' };
+    if (!failure && packet.status === 'DROPPED') {
+      // A dropped packet is never animated along its route: the backend reports
+      // the device it is currently on (the source for anything not delivered)
+      // and the reason, so the marker is placed there and stops.
+      const reported = packet.current_device ? deviceById(packet.current_device) : null;
+      failure = { device: reported || sourceDevice, reason: engineReason || 'DROPPED' };
+    }
+  }
+
+  const marker = packetMarker(packet, color, failure ? `${baseLabel} · ${failure.reason}` : baseLabel, `${transportClass} ${stateClass}${failure ? ' dropped' : ''}`);
+  const end = failure ? { x: failure.device.x, y: failure.device.y } : { x: hops[hops.length - 1].x2, y: hops[hops.length - 1].y2 };
+  const entry = {
+    packet, generation: packetAnimator.generation, element: marker.group, trail: null, pulse: marker.pulse,
+    hops, hop: 0, started: packetAnimator.now(), done: false, expires: 0,
+    outcomeClass: failure ? 'dropped' : 'delivered', end,
+  };
+  if (failure) {
+    entry.done = true;
+    entry.expires = entry.started + PACKET_MARKER_LINGER;
+    marker.group.setAttribute('transform', `translate(${end.x.toFixed(1)},${end.y.toFixed(1)})`);
+  } else {
+    entry.trail = packetTrail(color);
+    packetLayer.appendChild(entry.trail);
+    marker.group.setAttribute('transform', `translate(${hops[0].x1.toFixed(1)},${hops[0].y1.toFixed(1)})`);
+  }
+  packetLayer.appendChild(marker.group);
+  marker.group.addEventListener('click', () => { selected = { kind: 'packet', data: packet }; diagnosticView = false; transportView = false; renderInspector(); });
+  packetAnimator.add(entry);
 }
 function renderDiagnosticToolbar(){
   const source=selected?.kind==='device'?selected.id:null;
@@ -434,7 +649,7 @@ function bindInspectorActions() {
 }
 function renderConsole(){const d=selected.id;inspectorBody.innerHTML=`<div class="device-hero"><div class="device-symbol">›_</div><div><b>${esc(d)} console</b><span>Real backend commands only</span></div></div><div class="console-output" id="consoleOutput">${esc(d)}&gt; _</div><div class="console-form"><input id="consoleInput" value="show interfaces"/><button data-console>Run</button></div><div class="button-row"><button data-action="close-console">Back to device</button></div>`;inspectorBody.querySelector('[data-console]').addEventListener('click',runConsole);inspectorBody.querySelector('[data-action="close-console"]').addEventListener('click',()=>{selected={kind:'device',id:d};renderInspector();});}
 async function runConsole(){const command=$('consoleInput').value;const output=$('consoleOutput');output.textContent+=`\n${command}`;try{const result=await api('console',{id:selected.id,command});output.textContent+=`\n${result.state.output}`;}catch(error){output.textContent+=`\n${error.message}`;}}
-function setMode(next){mode=next;connectStart=null;document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));toast(`${next[0].toUpperCase()+next.slice(1)} tool active`);}
+function setMode(next){mode=next;connectStart=null;connectPreview.setAttribute('d','');document.querySelectorAll('[data-mode]').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));toast(`${next[0].toUpperCase()+next.slice(1)} tool active`);}
 document.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
 document.querySelectorAll('[data-menu]').forEach(button=>button.addEventListener('click',()=>{const action=button.dataset.menu;if(action==='file'){$('newBtn').click();}else if(action==='simulation'){$('playBtn').click();}else if(action==='view'){$('fitBtn').click();$('gridToggle').checked=!$('gridToggle').checked;renderCanvas();}else{toast('Build a topology, connect devices, start traffic, then inject faults to observe self-healing.');}}));
 document.querySelectorAll('[data-diagnostic]').forEach(button=>button.addEventListener('click',async()=>{const action=button.dataset.diagnostic;if(action==='transport'){transportView=true;servicesView=false;diagnosticView=false;renderInspector();return;}
@@ -447,14 +662,12 @@ canvas.addEventListener('pointermove',e=>{if(connectStart&&state){const from=sta
 canvas.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.65,Math.min(1.5,zoom+(e.deltaY<0?.05:-.05)));canvas.style.transform=`scale(${zoom})`;},{passive:false});
 $('gridToggle').addEventListener('change',renderCanvas);$('snapToggle').addEventListener('change',()=>{});
 $('clearSelection').addEventListener('click',()=>{selected=null;diagnosticView=false;transportView=false;renderInspector();});
-$('newBtn').addEventListener('click',()=>{if(confirm('Start a new blank network?'))api('new').then(()=>{selected=null;diagnosticView=false;transportView=false;state.packetListView=false;connectStart=null;renderInspector();});});
-$('presetSelect').addEventListener('change',e=>api('load_preset',{preset:e.target.value}).then(()=>{selected=null;diagnosticView=false;transportView=false;state.packetListView=false;connectStart=null;renderInspector();}));
+$('newBtn').addEventListener('click',()=>{if(confirm('Start a new blank network?')){packetAnimator.clearAll();api('new').then(()=>{selected=null;diagnosticView=false;transportView=false;state.packetListView=false;connectStart=null;renderInspector();});}});
+$('presetSelect').addEventListener('change',e=>{packetAnimator.clearAll();api('load_preset',{preset:e.target.value}).then(()=>{selected=null;diagnosticView=false;transportView=false;state.packetListView=false;connectStart=null;renderInspector();});});
 $('saveBtn').addEventListener('click',async()=>{const data=await api('export');const blob=new Blob([JSON.stringify(data.state.document,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='netadapt-lab.json';a.click();URL.revokeObjectURL(a.href);toast('Topology saved');});
-$('openBtn').addEventListener('click',()=>$('fileInput').click());$('fileInput').addEventListener('change',async e=>{const file=e.target.files[0];if(file)api('import',{document:JSON.parse(await file.text())});e.target.value='';});
+$('openBtn').addEventListener('click',()=>$('fileInput').click());$('fileInput').addEventListener('change',async e=>{const file=e.target.files[0];if(file){packetAnimator.clearAll();api('import',{document:JSON.parse(await file.text())});}e.target.value='';});
 $('undoBtn').addEventListener('click',()=>api('undo'));$('redoBtn').addEventListener('click',()=>api('redo'));
-$('playBtn').addEventListener('click',async()=>{await api('running',{value:true});play();});$('pauseBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stopBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stepBtn').addEventListener('click',()=>api('step'));$('resetBtn').addEventListener('click',()=>{stop();api('reset');});$('speedSelect').addEventListener('change',e=>{api('speed',{value:Number(e.target.value)});$('workspaceSpeed').value=e.target.value;});
-document.querySelectorAll('[data-workspace-control]').forEach(button=>button.addEventListener('click',async()=>{const control=button.dataset.workspaceControl;if(control==='play'){await api('running',{value:true});play();}else if(control==='step'){stop();await api('step');}else{stop();await api('running',{value:false});if(control==='reset')await api('reset');}}));
-$('workspaceSpeed').addEventListener('change',e=>{api('speed',{value:Number(e.target.value)});$('speedSelect').value=e.target.value;});
+$('playBtn').addEventListener('click',async()=>{await api('running',{value:true});play();const q=(state?.queue?.length||0);const active=(state?.packets||[]).filter(p=>p.status==='PENDING'||p.status==='QUEUED').length;if(!q&&!active){const done=(state?.metrics?.sent||0)>0;if(done){toast('All packets finished. Use ↻ Reset, or send more traffic from the Inspector.');}else{toast('Running — but there are no packets yet. Click a device on the canvas, then in the Inspector panel pick a Destination and click “Start traffic”.');}}});$('pauseBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stopBtn').addEventListener('click',()=>{stop();api('running',{value:false});});$('stepBtn').addEventListener('click',()=>api('step'));$('resetBtn').addEventListener('click',()=>{stop();packetAnimator.clearAll();api('reset');});$('speedSelect').addEventListener('change',e=>api('speed',{value:Number(e.target.value)}));
 $('fitBtn').addEventListener('click',()=>{if(!state.devices.length)return;const xs=state.devices.map(d=>d.x),ys=state.devices.map(d=>d.y),minX=Math.min(...xs)-100,maxX=Math.max(...xs)+100,minY=Math.min(...ys)-100,maxY=Math.max(...ys)+100;canvas.setAttribute('viewBox',`${minX} ${minY} ${maxX-minX} ${maxY-minY}`);});
 async function play(){stop();playTimer=setInterval(async()=>{if(!state?.running){stop();return;}try{await api('step');}catch(e){stop();}},Math.max(120,600/(state?.speed||1)));}function stop(){if(playTimer)clearInterval(playTimer);playTimer=null;}
 document.addEventListener('keydown',e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected?.kind==='device'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){e.preventDefault();api('delete_device',{id:selected.id});}if(e.key==='Escape'){selected=null;diagnosticView=false;transportView=false;connectStart=null;renderInspector();}});
