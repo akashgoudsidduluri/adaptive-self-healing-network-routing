@@ -81,6 +81,9 @@ function clearAllPacketVisuals() {
   for (const timer of activePacketTimers) clearTimeout(timer);
   activePacketTimers.clear();
   seenPacketIds.clear();
+  if (typeof packetAnimator !== 'undefined' && packetAnimator) {
+    packetAnimator.clearAll();
+  }
   if (packetLayer) packetLayer.innerHTML = '';
   if (routeLayer) routeLayer.innerHTML = '';
 }
@@ -100,6 +103,406 @@ function triggerDeliveryFlash(x, y) {
   packetLayer.insertAdjacentHTML('beforeend', `<g id="${flashId}" class="delivery-indicator" transform="translate(${x},${y})"><circle class="delivery-pulse" r="5" fill="none" stroke="#10B981" stroke-width="1.5"/></g>`);
   registerTimer(() => { document.getElementById(flashId)?.remove(); }, 400);
 }
+
+class PacketAnimator {
+  constructor() {
+    this.journeys = new Map(); // packetId -> JourneyRecord
+    this.rafId = null;
+    this.lastTime = null;
+    this.tickBound = this.tick.bind(this);
+    this.MAX_ACTIVE = 60;
+  }
+
+  resolveRouteCoords(packet) {
+    let route = (Array.isArray(packet.route) && packet.route.length >= 2) ? packet.route : null;
+    if (!route && packet.flow_id && state?.flows) {
+      const flow = state.flows.find(f => f.id === packet.flow_id || f.flow_id === packet.flow_id);
+      if (flow && Array.isArray(flow.route) && flow.route.length >= 2) {
+        route = flow.route;
+      }
+    }
+    if (!route && state?.transport?.flows) {
+      const tflow = state.transport.flows.find(f => f.flow_id === packet.flow_id || f.id === packet.flow_id);
+      if (tflow && Array.isArray(tflow.route) && tflow.route.length >= 2) {
+        route = tflow.route;
+      }
+    }
+    if (!route && packet.source && packet.destination) {
+      route = findTopologyRoute(packet.source, packet.destination);
+    }
+
+    const deviceMap = new Map((state?.devices || []).map(d => [d.id, d]));
+    let points = (route || []).map(id => {
+      const d = deviceMap.get(id);
+      return d ? { id: d.id, x: d.x, y: d.y } : null;
+    }).filter(Boolean);
+
+    if (points.length < 2) {
+      const srcDev = deviceMap.get(packet.source);
+      const dstDev = deviceMap.get(packet.destination);
+      if (srcDev && dstDev && srcDev !== dstDev) {
+        points = [{ id: srcDev.id, x: srcDev.x, y: srcDev.y }, { id: dstDev.id, x: dstDev.x, y: dstDev.y }];
+      } else if (srcDev) {
+        points = [{ id: srcDev.id, x: srcDev.x, y: srcDev.y }];
+      }
+    }
+    return points;
+  }
+
+  computeHopDuration(fromId, toId) {
+    const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
+    let latency = 0;
+    if (state?.links && fromId && toId) {
+      const l = state.links.find(item =>
+        (item.source === fromId && item.target === toId) ||
+        (item.source === toId && item.target === fromId)
+      );
+      if (l) latency = Number(l.latency || 0);
+    }
+    // ~950 ms per hop at 1x speed, scaled up by link latency and divided by sim speed
+    const rawDuration = (950 + latency * 12) / simSpeed;
+    return Math.max(160, Math.round(rawDuration));
+  }
+
+  computeHopDurations(coords) {
+    const durations = [];
+    for (let i = 0; i < coords.length - 1; i++) {
+      durations.push(this.computeHopDuration(coords[i].id, coords[i + 1].id));
+    }
+    return durations;
+  }
+
+  determineDropHop(packet, coords) {
+    if (coords.length <= 1) return 0;
+
+    if (packet.current_device) {
+      const idx = coords.findIndex(c => c.id === packet.current_device);
+      if (idx >= 0) return idx;
+    }
+
+    for (let i = 0; i < coords.length; i++) {
+      const dev = (state?.devices || []).find(d => d.id === coords[i].id);
+      if (dev && dev.status === 'DOWN') {
+        return Math.max(0, i - 1);
+      }
+    }
+
+    for (let i = 0; i < coords.length - 1; i++) {
+      const u = coords[i].id, v = coords[i + 1].id;
+      const link = (state?.links || []).find(l => (l.source === u && l.target === v) || (l.source === v && l.target === u));
+      if (link && link.status === 'DOWN') {
+        return i;
+      }
+    }
+
+    const reason = String(packet.drop_reason || packet.reason || '');
+    if (reason.includes('NO_ROUTE') || reason.includes('UNREACHABLE')) {
+      return 0;
+    }
+
+    return Math.max(0, coords.length - 2);
+  }
+
+  startPacket(packet, startDelay = 0) {
+    if (!packetLayer) return;
+    const packetKey = String(packet.id);
+
+    if (this.journeys.has(packetKey)) {
+      this.updatePacket(packet);
+      return;
+    }
+
+    if (this.journeys.size >= this.MAX_ACTIVE) {
+      const oldestKey = this.journeys.keys().next().value;
+      this.removeJourney(oldestKey);
+    }
+
+    const coords = this.resolveRouteCoords(packet);
+    if (!coords.length) return;
+
+    const isDropped = packet.status === 'DROPPED';
+    const dropReason = packet.drop_reason || packet.reason || 'DROPPED';
+    const dropHopIndex = isDropped ? this.determineDropHop(packet, coords) : -1;
+
+    if (isDropped && (dropHopIndex === 0 || coords.length < 2)) {
+      this.renderDropIndicator(coords[0], packet, dropReason);
+      return;
+    }
+
+    if (coords.length < 2) return;
+
+    const markerId = `packetMarker-${packet.id}-${Date.now()}`;
+    const protocol = packet.protocol || 'IP';
+    const kind = packet.kind || 'DATA';
+    const retransmission = Number(packet.retransmission || 0);
+    const transportClass = protocol === 'TCP' ? `transport tcp-${kind.toLowerCase()}` : protocol === 'UDP' ? 'transport udp-data' : '';
+    const stateClass = `${isDropped ? 'dropped ' : ''}${retransmission ? 'retransmission' : ''}`;
+    const label = protocol === 'TCP' ? `${protocol} ${(packet.flags || []).join('+') || kind}${retransmission ? ' ↻' + retransmission : ''}` : protocol === 'UDP' ? `${protocol} DATA` : `P${packet.id}`;
+
+    // Insert marker at initial source coordinates. If startDelay > 0, hide until delay elapses to avoid visual overlap.
+    const initialVisibility = startDelay > 0 ? 'opacity: 0;' : 'opacity: 1;';
+    packetLayer.insertAdjacentHTML('beforeend', `
+      <g id="${markerId}" class="packet packet-marker ${transportClass} ${stateClass}" data-packet="${packet.id}" style="${initialVisibility}" transform="translate(${coords[0].x},${coords[0].y})">
+        <circle class="packet-ring" r="5"/>
+        <circle class="packet-core" r="2.2"/>
+        <text class="packet-label" y="-9">${esc(label)}</text>
+      </g>
+    `);
+
+    const markerEl = document.getElementById(markerId);
+    markerEl?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selected = { kind: 'packet', data: packet };
+      diagnosticView = false;
+      transportView = false;
+      openInspector();
+    });
+
+    const hopDurations = this.computeHopDurations(coords);
+
+    const journey = {
+      packetId: packetKey,
+      markerId,
+      markerEl,
+      packet,
+      coords,
+      totalHops: coords.length - 1,
+      currentHop: 0,
+      hopElapsed: 0,
+      hopDurations,
+      startDelay,
+      isDropped,
+      dropHopIndex,
+      dropReason,
+      finished: false,
+      currentX: coords[0].x,
+      currentY: coords[0].y,
+    };
+
+    this.journeys.set(packetKey, journey);
+
+    if (!this.rafId) {
+      this.lastTime = null;
+      this.rafId = requestAnimationFrame(this.tickBound);
+    }
+  }
+
+  updatePacket(packet) {
+    const packetKey = String(packet.id);
+    const journey = this.journeys.get(packetKey);
+    if (!journey || journey.finished) return;
+
+    journey.packet = packet;
+
+    if (!journey.isDropped && packet.status === 'DROPPED') {
+      journey.isDropped = true;
+      journey.dropReason = packet.drop_reason || packet.reason || 'DROPPED';
+      journey.dropHopIndex = Math.max(journey.currentHop, this.determineDropHop(packet, journey.coords));
+      journey.markerEl?.classList.add('dropped');
+    }
+
+    const newCoords = this.resolveRouteCoords(packet);
+    if (newCoords.length >= 2) {
+      const oldPathStr = journey.coords.map(c => c.id).join('->');
+      const newPathStr = newCoords.map(c => c.id).join('->');
+      if (oldPathStr !== newPathStr) {
+        this.applyMidFlightReroute(journey, newCoords);
+      }
+    }
+  }
+
+  applyMidFlightReroute(journey, newCoords) {
+    const currentHop = journey.currentHop;
+    const currentFrom = journey.coords[currentHop];
+    const currentTo = journey.coords[currentHop + 1];
+
+    if (!currentTo) return;
+
+    const toIndexInNew = newCoords.findIndex(c => c.id === currentTo.id);
+    if (toIndexInNew >= 0) {
+      const tail = newCoords.slice(toIndexInNew + 1);
+      journey.coords = [...journey.coords.slice(0, currentHop + 2), ...tail];
+      journey.totalHops = journey.coords.length - 1;
+      journey.hopDurations = this.computeHopDurations(journey.coords);
+      return;
+    }
+
+    const fromIndexInNew = newCoords.findIndex(c => c.id === currentFrom?.id);
+    if (fromIndexInNew >= 0 && fromIndexInNew < newCoords.length - 1) {
+      const waypoint = { id: `wp-${Date.now()}`, x: journey.currentX, y: journey.currentY };
+      const tail = newCoords.slice(fromIndexInNew + 1);
+      journey.coords = [waypoint, ...tail];
+      journey.currentHop = 0;
+      journey.hopElapsed = 0;
+      journey.totalHops = journey.coords.length - 1;
+      journey.hopDurations = this.computeHopDurations(journey.coords);
+      return;
+    }
+
+    const waypoint = { id: `wp-${Date.now()}`, x: journey.currentX, y: journey.currentY };
+    journey.coords = [waypoint, ...newCoords];
+    journey.currentHop = 0;
+    journey.hopElapsed = 0;
+    journey.totalHops = journey.coords.length - 1;
+    journey.hopDurations = this.computeHopDurations(journey.coords);
+  }
+
+  updateSpeed() {
+    for (const journey of this.journeys.values()) {
+      if (journey.finished) continue;
+
+      for (let h = journey.currentHop; h < journey.coords.length - 1; h++) {
+        const oldDur = journey.hopDurations[h] || 950;
+        const newDur = this.computeHopDuration(journey.coords[h].id, journey.coords[h + 1].id);
+        journey.hopDurations[h] = newDur;
+
+        if (h === journey.currentHop && oldDur > 0) {
+          const progress = Math.min(1, journey.hopElapsed / oldDur);
+          journey.hopElapsed = progress * newDur;
+        }
+      }
+    }
+  }
+
+  tick(now) {
+    if (!this.lastTime) this.lastTime = now;
+    const deltaMs = Math.min(100, Math.max(1, now - this.lastTime));
+    this.lastTime = now;
+
+    for (const [id, journey] of this.journeys.entries()) {
+      if (journey.finished) continue;
+
+      if (journey.startDelay > 0) {
+        journey.startDelay -= deltaMs;
+        if (journey.startDelay > 0) {
+          continue;
+        } else if (journey.markerEl) {
+          journey.markerEl.style.opacity = '1';
+        }
+      } else if (journey.markerEl && journey.markerEl.style.opacity === '0') {
+        journey.markerEl.style.opacity = '1';
+      }
+
+      journey.hopElapsed += deltaMs;
+      const currentHopDur = journey.hopDurations[journey.currentHop] || 950;
+      const t = Math.min(1, Math.max(0, journey.hopElapsed / currentHopDur));
+
+      const p1 = journey.coords[journey.currentHop];
+      const p2 = journey.coords[journey.currentHop + 1];
+
+      if (!p1 || !p2) {
+        this.finishJourney(id, journey);
+        continue;
+      }
+
+      // Explicit linear interpolation hop by hop
+      const curX = p1.x + (p2.x - p1.x) * t;
+      const curY = p1.y + (p2.y - p1.y) * t;
+      journey.currentX = curX;
+      journey.currentY = curY;
+
+      if (journey.markerEl) {
+        journey.markerEl.setAttribute('transform', `translate(${curX.toFixed(1)},${curY.toFixed(1)})`);
+      }
+
+      if (journey.hopElapsed >= currentHopDur) {
+        journey.currentHop++;
+        journey.hopElapsed = 0;
+
+        if (journey.isDropped && journey.currentHop >= journey.dropHopIndex) {
+          this.dropJourneyAt(id, journey, p2);
+          continue;
+        }
+
+        if (journey.currentHop >= journey.totalHops) {
+          this.finishJourney(id, journey);
+        }
+      }
+    }
+
+    if (this.journeys.size > 0) {
+      this.rafId = requestAnimationFrame(this.tickBound);
+    } else {
+      this.rafId = null;
+      this.lastTime = null;
+    }
+  }
+
+  finishJourney(id, journey) {
+    if (journey.finished) return;
+    journey.finished = true;
+    const dest = journey.coords[journey.coords.length - 1];
+
+    if (journey.packet.status === 'DELIVERED' && dest) {
+      triggerDeliveryFlash(dest.x, dest.y);
+    }
+
+    registerTimer(() => {
+      this.removeJourney(id);
+    }, 250);
+  }
+
+  dropJourneyAt(id, journey, dropDevice) {
+    if (journey.finished) return;
+    journey.finished = true;
+    journey.markerEl?.remove();
+    journey.markerEl = null;
+
+    this.renderDropIndicator(dropDevice, journey.packet, journey.dropReason);
+    this.journeys.delete(id);
+  }
+
+  renderDropIndicator(device, packet, reason) {
+    if (!packetLayer || !device) return;
+    const markerId = `dropLoc-${packet.id}-${Date.now()}`;
+    const label = `P${packet.id} ${esc(reason)}`;
+
+    packetLayer.insertAdjacentHTML('beforeend', `
+      <g id="${markerId}" class="packet dropped drop-indicator" data-packet="${packet.id}" transform="translate(${device.x},${device.y})">
+        <circle class="packet-ring" r="5"/>
+        <circle class="packet-core" r="2.2"/>
+        <line x1="-2.5" y1="-2.5" x2="2.5" y2="2.5" stroke="#FFFFFF" stroke-width="1.2"/>
+        <line x1="-2.5" y1="2.5" x2="2.5" y2="-2.5" stroke="#FFFFFF" stroke-width="1.2"/>
+        <text class="packet-label" y="-9">${label}</text>
+      </g>
+    `);
+
+    const dropEl = document.getElementById(markerId);
+    dropEl?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selected = { kind: 'packet', data: packet };
+      diagnosticView = false;
+      transportView = false;
+      openInspector();
+    });
+
+    registerTimer(() => {
+      dropEl?.remove();
+    }, 1800);
+  }
+
+  removeJourney(id) {
+    const journey = this.journeys.get(id);
+    if (journey) {
+      journey.markerEl?.remove();
+      this.journeys.delete(id);
+    }
+  }
+
+  clearAll() {
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.lastTime = null;
+    for (const journey of this.journeys.values()) {
+      journey.markerEl?.remove();
+    }
+    this.journeys.clear();
+  }
+}
+
+const packetAnimator = new PacketAnimator();
 
 const TYPES = { pc: 'PC', laptop: 'Laptop', server: 'Server', printer: 'Printer', router: 'Router', switch: 'Switch', hub: 'Hub', access_point: 'Access Point', cloud: 'Cloud', internet: 'Internet' };
 const TYPE_CLASS = { pc: 'host', laptop: 'host', server: 'server', printer: 'host', router: 'router', switch: 'switch', hub: 'switch', access_point: 'switch', cloud: 'cloud', internet: 'cloud' };
@@ -308,7 +711,7 @@ function renderCanvas() {
     clearAllPacketVisuals();
   } else {
     const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
-    const staggerInterval = Math.max(120, Math.round(200 / simSpeed));
+    const staggerInterval = Math.max(140, Math.round(220 / simSpeed));
     let newBatchIndex = 0;
     packets.forEach(packet => {
       const packetKey = String(packet.id);
@@ -316,23 +719,23 @@ function renderCanvas() {
         seenPacketIds.add(packetKey);
         const delay = newBatchIndex * staggerInterval;
         newBatchIndex++;
-        if (delay === 0) {
-          animatePacket(packet);
-        } else {
-          registerTimer(() => {
-            if (seenPacketIds.has(packetKey)) {
-              animatePacket(packet);
-            }
-          }, delay);
-        }
+        packetAnimator.startPacket(packet, delay);
+      } else {
+        packetAnimator.updatePacket(packet);
       }
     });
   }
   renderDiagnosticToolbar();
   $('undoBtn').disabled = !state.can_undo; $('redoBtn').disabled = !state.can_redo;
   $('playBtn').classList.toggle('primary', state.running);
-  if ($('workspaceSpeed') && $('workspaceSpeed').value !== String(state.speed ?? 1)) $('workspaceSpeed').value = String(state.speed ?? 1);
-  if ($('speedSelect') && $('speedSelect').value !== String(state.speed ?? 1)) $('speedSelect').value = String(state.speed ?? 1);
+  if ($('workspaceSpeed') && $('workspaceSpeed').value !== String(state.speed ?? 1)) {
+    $('workspaceSpeed').value = String(state.speed ?? 1);
+    packetAnimator.updateSpeed();
+  }
+  if ($('speedSelect') && $('speedSelect').value !== String(state.speed ?? 1)) {
+    $('speedSelect').value = String(state.speed ?? 1);
+    packetAnimator.updateSpeed();
+  }
 }
 function renderTimeline() {
   const events = (state.events || []).slice().reverse();
@@ -355,85 +758,7 @@ function bindNode(el) {
 }
 function canvasPoint(event) { const point = canvas.createSVGPoint(); point.x = event.clientX; point.y = event.clientY; return point.matrixTransform(canvas.getScreenCTM().inverse()); }
 function animatePacket(packet) {
-  let route = (packet.route && packet.route.length >= 2) ? packet.route : null;
-  if (!route && packet.flow_id && state.flows) {
-    const flow = state.flows.find(f => f.id === packet.flow_id || f.flow_id === packet.flow_id);
-    if (flow && flow.route && flow.route.length >= 2) {
-      route = flow.route;
-    }
-  }
-  if (!route && state.transport?.flows) {
-    const tflow = state.transport.flows.find(f => f.flow_id === packet.flow_id || f.id === packet.flow_id);
-    if (tflow && tflow.route && tflow.route.length >= 2) {
-      route = tflow.route;
-    }
-  }
-  if (!route && packet.source && packet.destination) {
-    route = findTopologyRoute(packet.source, packet.destination);
-  }
-
-  const sourceDevice = (state.devices || []).find(d => d.id === packet.source);
-  if (!sourceDevice) return;
-  const isDropped = packet.status === 'DROPPED';
-  let points = (route || []).map(id => (state.devices || []).find(d => d.id === id)).filter(Boolean);
-  if (points.length < 2) {
-    const dstDevice = (state.devices || []).find(d => d.id === packet.destination);
-    if (dstDevice && dstDevice !== sourceDevice) {
-      points = [sourceDevice, dstDevice];
-    }
-  }
-
-  // Guarantee only one visible marker per packet by removing any stale marker
-  packetLayer.querySelectorAll(`[data-packet="${CSS.escape(String(packet.id))}"]`).forEach(el => el.remove());
-
-  if (isDropped && points.length < 2) {
-    const markerId = `packetDrop-${packet.id}-${Date.now()}`;
-    const reason = packet.drop_reason || packet.reason || 'NO_ROUTE';
-    packetLayer.insertAdjacentHTML('beforeend', `<g id="${markerId}" class="packet dropped drop-indicator" data-packet="${packet.id}" transform="translate(${sourceDevice.x},${sourceDevice.y})"><circle class="packet-ring" r="5"/><circle class="packet-core" r="2.2"/><line x1="-2.5" y1="-2.5" x2="2.5" y2="2.5" stroke="#FFFFFF" stroke-width="1.2"/><line x1="-2.5" y1="2.5" x2="2.5" y2="-2.5" stroke="#FFFFFF" stroke-width="1.2"/><text class="packet-label" y="-9">P${packet.id} ${esc(reason)}</text></g>`);
-    packetLayer.querySelector(`[data-packet="${CSS.escape(String(packet.id))}"]`)?.addEventListener('click', (e) => { e.stopPropagation(); selected = { kind: 'packet', data: packet }; diagnosticView = false; transportView = false; openInspector(); });
-    registerTimer(() => { document.getElementById(markerId)?.remove(); }, 1800);
-    return;
-  }
-  if (points.length < 2) return;
-
-  const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
-  const hopDuration = Math.round(360 / simSpeed);
-  const totalHops = points.length - 1;
-  const totalDur = Math.max(260, totalHops * hopDuration);
-  let dropHopIndex = totalHops;
-  if (isDropped) dropHopIndex = Math.max(1, totalHops - 1);
-  const animPoints = isDropped ? points.slice(0, dropHopIndex + 1) : points;
-  if (animPoints.length < 2) animPoints.push(points[1] || points[0]);
-  const animHops = Math.max(1, animPoints.length - 1);
-  const animDur = Math.round(totalDur * (animHops / totalHops));
-
-  const markerId = `packetMarker-${packet.id}-${Date.now()}`;
-  const d = animPoints.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' ');
-  const protocol = packet.protocol || 'IP';
-  const kind = packet.kind || 'DATA';
-  const retransmission = Number(packet.retransmission || 0);
-  const transportClass = protocol === 'TCP' ? `transport tcp-${kind.toLowerCase()}` : protocol === 'UDP' ? 'transport udp-data' : '';
-  const stateClass = `${isDropped ? 'dropped ' : ''}${retransmission ? 'retransmission' : ''}`;
-  const label = protocol === 'TCP' ? `${protocol} ${(packet.flags || []).join('+') || kind}${retransmission ? ' ↻' + retransmission : ''}` : protocol === 'UDP' ? `${protocol} DATA` : `P${packet.id}`;
-  const destDevice = animPoints[animPoints.length - 1];
-
-  // Packet rendered ONLY as small, distinct orange circle with white center (no lines, no glows, no trails)
-  packetLayer.insertAdjacentHTML('beforeend', `<g id="${markerId}" class="packet packet-marker ${transportClass} ${stateClass}" data-packet="${packet.id}"><circle class="packet-ring" r="5"/><circle class="packet-core" r="2.2"/><text class="packet-label" y="-9">${esc(label)}</text><animateMotion path="${d}" dur="${animDur}ms" repeatCount="1" fill="freeze"/></g>`);
-
-  const markerEl = document.getElementById(markerId);
-  markerEl?.addEventListener('click', (e) => { e.stopPropagation(); selected = { kind: 'packet', data: packet }; diagnosticView = false; transportView = false; openInspector(); });
-
-  registerTimer(() => {
-    document.getElementById(markerId)?.remove();
-    if (packet.status === 'DELIVERED' && destDevice) {
-      triggerDeliveryFlash(destDevice.x, destDevice.y);
-    } else if (isDropped && destDevice) {
-      const dropMarkerId = `dropLoc-${packet.id}-${Date.now()}`;
-      const reason = packet.drop_reason || packet.reason || 'DROPPED';
-      packetLayer.insertAdjacentHTML('beforeend', `<g id="${dropMarkerId}" class="packet dropped drop-indicator" data-packet="${packet.id}" transform="translate(${destDevice.x},${destDevice.y})"><circle class="packet-ring" r="5"/><circle class="packet-core" r="2.2"/><line x1="-2.5" y1="-2.5" x2="2.5" y2="2.5" stroke="#FFFFFF" stroke-width="1.2"/><line x1="-2.5" y1="2.5" x2="2.5" y2="-2.5" stroke="#FFFFFF" stroke-width="1.2"/><text class="packet-label" y="-9">P${packet.id} ${esc(reason)}</text></g>`);
-      registerTimer(() => { document.getElementById(dropMarkerId)?.remove(); }, 1800);
-    }
-  }, animDur + 30);
+  packetAnimator.startPacket(packet);
 }
 
 function renderDiagnosticToolbar() {
@@ -808,9 +1133,9 @@ $('presetSelect').addEventListener('change', e => { clearAllPacketVisuals(); api
 $('saveBtn').addEventListener('click', async () => { const data = await api('export'); const blob = new Blob([JSON.stringify(data.state.document, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'netadapt-lab.json'; a.click(); URL.revokeObjectURL(a.href); toast('Topology saved'); });
 $('openBtn').addEventListener('click', () => $('fileInput').click()); $('fileInput').addEventListener('change', async e => { const file = e.target.files[0]; if (file) { clearAllPacketVisuals(); api('import', { document: JSON.parse(await file.text()) }); } e.target.value = ''; });
 $('undoBtn').addEventListener('click', () => api('undo')); $('redoBtn').addEventListener('click', () => api('redo'));
-$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('workspaceSpeed').value = e.target.value; });
+$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('workspaceSpeed').value = e.target.value; packetAnimator.updateSpeed(); });
 document.querySelectorAll('[data-workspace-control]').forEach(button => button.addEventListener('click', async () => { const control = button.dataset.workspaceControl; if (control === 'play') { await api('running', { value: true }); play(); } else if (control === 'step') { stop(); await api('step'); } else { stop(); await api('running', { value: false }); if (control === 'reset') { clearAllPacketVisuals(); await api('reset'); } } }));
-$('workspaceSpeed').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('speedSelect').value = e.target.value; });
+$('workspaceSpeed').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('speedSelect').value = e.target.value; packetAnimator.updateSpeed(); });
 $('fitBtn').addEventListener('click', () => { if (!state.devices.length) return; const xs = state.devices.map(d => d.x), ys = state.devices.map(d => d.y), minX = Math.min(...xs) - 100, maxX = Math.max(...xs) + 100, minY = Math.min(...ys) - 100, maxY = Math.max(...ys) + 100; canvas.setAttribute('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`); });
 async function play() { stop(); playTimer = setInterval(async () => { if (!state?.running) { stop(); return; } try { await api('step'); } catch (e) { stop(); } }, Math.max(120, 600 / (state?.speed || 1))); } function stop() { if (playTimer) clearInterval(playTimer); playTimer = null; }
 document.addEventListener('keydown', e => { if ((e.key === 'Delete' || e.key === 'Backspace') && selected?.kind === 'device' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); api('delete_device', { id: selected.id }); } if (e.key === 'Escape') { closeInspector(); } });
