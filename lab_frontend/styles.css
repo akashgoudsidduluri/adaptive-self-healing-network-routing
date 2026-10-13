@@ -842,6 +842,36 @@ select:hover, input:hover {
   font-weight: 600;
 }
 
+.link-label.failed rect {
+  stroke: #DC2626;
+  fill: #FEF2F2;
+}
+
+.link-label.failed text {
+  fill: #DC2626;
+  font-weight: 700;
+}
+
+.link-label.warning rect {
+  stroke: #D97706;
+  fill: #FFFBEB;
+}
+
+.link-label.warning text {
+  fill: #B45309;
+  font-weight: 600;
+}
+
+.link-label.loss rect {
+  stroke: #EA580C;
+  fill: #FFF7ED;
+}
+
+.link-label.loss text {
+  fill: #C2410C;
+  font-weight: 600;
+}
+
 .connect-preview {
   stroke: var(--forest);
   stroke-width: 2;
