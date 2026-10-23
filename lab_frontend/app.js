@@ -25,6 +25,7 @@ let playTimer = null;
 let zoom = 1;
 let origin = { x: 0, y: 0 };
 let inspectorOpen = true;
+let highlightedRoutePath = null;
 
 function closeInspector() {
   inspectorOpen = false;
@@ -77,7 +78,7 @@ function findTopologyRoute(srcId, dstId) {
   return [srcId, dstId];
 }
 
-function clearAllPacketVisuals() {
+function clearAllPacketVisuals(includeHighlights = true) {
   for (const timer of activePacketTimers) clearTimeout(timer);
   activePacketTimers.clear();
   seenPacketIds.clear();
@@ -85,7 +86,10 @@ function clearAllPacketVisuals() {
     packetAnimator.clearAll();
   }
   if (packetLayer) packetLayer.innerHTML = '';
-  if (routeLayer) routeLayer.innerHTML = '';
+  if (includeHighlights) {
+    highlightedRoutePath = null;
+    if (routeLayer) routeLayer.innerHTML = '';
+  }
 }
 
 function registerTimer(fn, ms) {
@@ -718,8 +722,12 @@ function renderCanvas() {
   $('statSent').textContent = Math.round(state.metrics.sent); $('statDelivered').textContent = Math.round(state.metrics.delivered); $('statDropped').textContent = Math.round(state.metrics.dropped); $('statPdr').textContent = `${fmt(state.metrics.pdr, 1)}%`; $('statLatency').textContent = `${fmt(state.metrics.latency, 1)} ms`; $('statRouteChanges').textContent = state.metrics.route_changes;
   const q = state.queue || {}; $('queueLength').textContent = `${Math.round(q.length || 0)} packets`; $('queueWait').textContent = `${fmt((q.average_wait || 0) * 1000, 1)} ms average wait`; $('flowCount').textContent = `${state.flows?.length || 0} active flows`; const summary = $('simulationSummary'); if (summary) summary.textContent = state.metrics.sent ? `${state.running ? 'SIMULATION RUNNING' : 'SIMULATION COMPLETE'} · ${Math.round(state.metrics.sent)} sent · ${Math.round(state.metrics.delivered)} delivered · ${Math.round(state.metrics.dropped)} dropped · PDR ${fmt(state.metrics.pdr, 1)}% · ${fmt(state.metrics.latency, 1)} ms avg` : 'Idle · no packets sent'; $('queueBar').style.width = `${Math.min(100, (q.length || 0) * 10)}%`;
   const packets = state.packets || [];
+  if (highlightedRoutePath && !routeStillCurrent(highlightedRoutePath)) {
+    highlightedRoutePath = null;
+    routeLayer.querySelectorAll('.user-highlight').forEach(el => el.remove());
+  }
   if (!packets.length) {
-    clearAllPacketVisuals();
+    clearAllPacketVisuals(false);
   } else {
     const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
     const staggerInterval = Math.max(140, Math.round(220 / simSpeed));
@@ -798,6 +806,9 @@ function diagnosticResultInspector() {
   if (result.type === 'mac') {
     return `<div class="device-hero"><div class="device-symbol">▥</div><div><b>${esc(result.title)}</b><span>${result.entries.length} learned entr${result.entries.length === 1 ? 'y' : 'ies'}</span></div></div>${result.message ? `<p class="hint">${esc(result.message)}</p>` : ''}<table class="diagnostic-table"><thead><tr><th>MAC Address</th><th>Interface</th><th>Type</th></tr></thead><tbody>${result.entries.map(entry => `<tr><td>${esc(entry.mac_address)}</td><td>${esc(entry.interface_id)}</td><td>${esc(entry.type)}</td></tr>`).join('') || '<tr><td colspan="3">No MAC addresses learned.</td></tr>'}</tbody></table><button class="danger" data-action="clear-mac">Clear MAC Table</button>`;
   }
+  if (result.type === 'routing_table') {
+    return `<div class="device-hero"><div class="device-symbol">◉</div><div><b>${esc(result.title)}</b><span>${result.entries.length} routes · ${esc(result.algorithm || 'dijkstra')}</span></div></div><table class="diagnostic-table route-table"><thead><tr><th>Destination</th><th>Via</th><th>Metric</th><th>Status</th></tr></thead><tbody>${result.entries.map((entry, idx) => `<tr class="clickable" data-diagnostic-route="${idx}"><td><b>${esc(entry.destination_network)}/${entry.prefix}</b><div class="route-path">${entry.route_path && entry.route_path.length ? esc(entry.route_path.join(' → ')) : 'No path'}</div></td><td>${esc(entry.next_hop || '—')}</td><td>${entry.metric == null ? '—' : fmt(entry.metric, 1)}</td><td><span class="route-status ${entry.status === 'REACHABLE' ? 'status-up' : 'status-down'}">${esc(entry.status)}</span></td></tr>`).join('') || '<tr><td colspan="4">No routes available.</td></tr>'}</tbody></table><div class="inspector-section"><div class="section-title">Route details</div><div class="hint">Click a route to highlight its path on the canvas.</div></div>`;
+  }
   return '<div class="inspector-empty"><div>⌁</div><p>No diagnostic result.</p></div>';
 }
 function packetListInspector() {
@@ -825,10 +836,14 @@ function deviceInspector(device) {
   <div class="inspector-section"><div class="section-title">Traffic generator</div><label>Protocol<select id="trafficProtocol"><option value="IP">IP traffic flow</option><option value="ICMP">ICMP Echo</option><option value="TCP">TCP data</option><option value="UDP">UDP datagrams</option></select></label><div class="traffic-form"><label>Destination<select id="trafficDestination">${state.devices.filter(d => d.id !== device.id && d.status === 'UP').map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}</select></label><div class="two"><label>Class<select id="trafficType"><option>Emergency</option><option>VoIP</option><option selected>Video</option><option>HTTP</option><option>FTP</option></select></label><label>Packets<input id="trafficCount" type="number" min="1" value="12"/></label></div><div class="two"><label>Rate (pps)<input id="trafficPps" type="number" min=".1" value="5"/></label><label>Size (B)<input id="trafficSize" type="number" min="64" value="1500"/></label></div><button data-action="start-traffic" data-source="${esc(device.id)}">Start traffic</button></div></div>
   ${device.type === 'router' ? routerTable(device) : device.type === 'switch' ? switchTable(device) : serverInfo(device)}`;
 }
-function routerTable(device) { const rows = state.routing_tables?.[device.id] || []; return `<div class="inspector-section"><div class="section-title">Routing table <span>${rows.length} routes</span></div>${rows.length ? rows.map(r => `<div class="interface-card"><b>${esc(r.destination_network)}/${r.prefix}</b><div>via ${esc(r.next_hop || 'DIRECT')} · ${esc(r.outgoing_interface)} · metric ${fmt(r.metric, 1)}</div></div>`).join('') : '<p class="hint">No route entries available.</p>'}</div>`; }
-function switchTable(device) { const rows = Object.entries(device.mac_table || {}); return `<div class="inspector-section"><div class="section-title">MAC address table <span>${rows.length}</span></div>${rows.length ? rows.map(([mac, port]) => `<div class="interface-card"><b>${esc(mac)}</b><div>${esc(port)}</div></div>`).join('') : '<p class="hint">No MACs learned.</p>'}</div>`; }
+function routerTable(device) { const rows = (state.routing_tables && state.routing_tables[device.id]) || (state.routing_table_entries && state.routing_table_entries[device.id]) || []; return `<div class="inspector-section"><div class="section-title">Routing table <span>${rows.length} routes</span></div>${rows.length ? rows.map((r, idx) => `<div class="interface-card clickable" data-route-idx="${idx}"><b>${esc(r.destination_network)}/${r.prefix}</b><div>via ${esc(r.next_hop || (r.status === 'UNREACHABLE' ? 'unreachable' : 'DIRECT'))} · ${esc(r.outgoing_interface || '—')} · metric ${r.metric == null ? '—' : fmt(r.metric, 1)} · <span class="route-status ${r.status === 'REACHABLE' ? 'status-up' : 'status-down'}">${esc(r.status || 'REACHABLE')}</span></div><div class="route-path hint">Path: ${(r.route_path && r.route_path.length) ? esc(r.route_path.join(' → ')) : ((r.path && r.path.length) ? esc(r.path.join(' → ')) : '—')}</div></div>`).join('') : '<p class="hint">No route entries available.</p>'}</div><div class="inspector-section"><div class="section-title">Route details</div><div class="hint">Click a routing table entry above to highlight its path on the canvas.</div></div>`; }
+function switchTable(device) {
+  const rows = Object.entries(device.mac_table || {});
+  const macOwner = (mac) => (state.devices || []).find(d => d.id !== device.id && (d.interfaces || []).some(i => i.mac_address === mac));
+  return `<div class="inspector-section"><div class="section-title">MAC address table <span>${rows.length} entries</span></div>${rows.length ? rows.map(([mac, port]) => { const owner = macOwner(mac); return `<div class="interface-card clickable" data-mac="${esc(mac)}" data-mac-port="${esc(port)}"><b>${esc(mac)}</b><div>Port: ${esc(port)}${owner ? ` · learned from ${esc(owner.name)}` : ''}</div><div class="hint">Dynamic entry · Click to highlight on canvas</div></div>`; }).join('') : '<p class="hint">No MACs learned. Frames will be flooded until destinations are learned.</p>'}</div><div class="inspector-section"><div class="section-title">MAC Table Information</div><div class="hint">Entries are dynamically learned when frames arrive at the switch. Click an entry to highlight the corresponding link on the canvas.</div></div>`;
+}
 function serverInfo(device) { return `<div class="inspector-section"><div class="section-title">Services</div><p class="hint">No application services configured. This server can carry simulator traffic.</p></div>`; }
-function linkInspector(link) { return `<div class="device-hero"><div class="device-symbol">⌁</div><div><b>${esc(link.source)} ↔ ${esc(link.target)}</b><span>Link inspector · ${esc(link.duplex)} duplex</span></div></div><div class="inspector-section"><div class="section-title">Link conditions <span class="link-state ${link.status === 'UP' ? 'status-up' : 'status-down'}">${link.status}</span></div>${property('Latency (ms)', link.latency)}<input id="linkLatency" type="number" value="${link.latency}"/><br>${property('Bandwidth (Mbps)', link.bandwidth)}<input id="linkBandwidth" type="number" value="${link.bandwidth}"/><br>${property('Packet loss (%)', fmt(link.packet_loss * 100, 1))}<input id="linkLoss" type="number" min="0" max="100" step="1" value="${fmt(link.packet_loss * 100, 1)}"/><br>${property('Congestion (%)', fmt(link.congestion * 100, 1))}<input id="linkCongestion" type="number" min="0" max="100" step="1" value="${fmt(link.congestion * 100, 1)}"/><div class="button-row"><button data-action="apply-link">Apply conditions</button><button class="danger" data-action="toggle-link">${link.status === 'UP' ? 'Fail link' : 'Recover link'}</button><button data-action="delete-link">Delete</button></div></div><div class="inspector-section"><div class="section-title">Interfaces</div>${property('Interface A', link.interface_a)}${property('Interface B', link.interface_b)}</div>`; }
+function linkInspector(link) { return `<div class="device-hero"><div class="device-symbol">⌁</div><div><b>${esc(link.source)} ↔ ${esc(link.target)}</b><span>Link inspector · ${esc(link.duplex)} duplex</span></div></div><div class="inspector-section"><div class="section-title">Link conditions <span class="link-state ${link.status === 'UP' ? 'status-up' : 'status-down'}">${link.status}</span></div>${property('Latency (ms)', link.latency)}<input id="linkLatency" type="number" value="${link.latency}"/><br>${property('Bandwidth (Mbps)', link.bandwidth)}<input id="linkBandwidth" type="number" value="${link.bandwidth}"/><br>${property('Packet loss (%)', fmt(link.packet_loss * 100, 1))}<input id="linkLoss" type="number" min="0" max="100" step="1" value="${fmt(link.packet_loss * 100, 1)}"/><br>${property('Congestion (%)', fmt(link.congestion * 100, 1))}<input id="linkCongestion" type="number" min="0" max="100" step="1" value="${fmt(link.congestion * 100, 1)}"/><div class="button-row"><button data-action="apply-link">Apply conditions</button><button class="danger" data-action="toggle-link">${link.status === 'UP' ? 'Fail link' : 'Recover link'}</button><button data-action="delete-link">Delete</button></div></div><div class="inspector-section"><div class="section-title">Interfaces</div>${property('Interface A', link.interface_a || 'eth0')}${property('Interface B', link.interface_b || 'eth0')}</div>`; }
 function packetInspector(packet) {
   const trafficClass = packet.traffic_class || packet.traffic_type;
   const journeyData = (state.journey && state.journey.packet_id === packet.id) ? state.journey : null;
@@ -840,7 +855,119 @@ function packetInspector(packet) {
   const pktLatency = packet.latency == null ? null : (packet.latency < 1 ? packet.latency * 1000 : packet.latency);
   return `<div class="device-hero"><div class="device-symbol" style="color:${COLORS[trafficClass] || '#56d9e8'}">●</div><div><b>Packet #${esc(packet.id)}</b><span>${esc(packet.status)} · ${esc(trafficClass)}</span></div></div><div class="inspector-section">${property('Source', packet.source)}${property('Destination', packet.destination)}${property('Protocol', packet.protocol || 'IP')}${property('Size', `${packet.size} bytes`)}${property('TTL', packet.ttl)}${property('Traffic class', trafficClass)}${transport ? property('Source port', packet.source_port) : ''}${transport ? property('Destination port', packet.destination_port) : ''}${transport ? property('Sequence number', packet.sequence_number ?? '—') : ''}${transport ? property('Acknowledgement number', packet.acknowledgement_number ?? '—') : ''}${transport ? property('Flags', (packet.flags || []).join(' ') || '—') : ''}${transport ? property('Window size', packet.window_size ?? '—') : ''}${transport ? property('Retransmission', packet.retransmission ?? 0) : ''}${property('Queue wait', queueWait == null ? '—' : `${fmt(queueWait, 2)} ms`)}${pktLatency != null ? property('Latency', `${fmt(pktLatency, 2)} ms`) : ''}${property('Current device', packet.current_device || '—')}${property('Next hop', packet.next_hop || '—')}${property('Status', packet.status)}${property('Flow ID', packet.flow_id || 'diagnostic')}${property('Route', (packet.route || []).join(' → ') || 'No route')}</div>${packet.service ? `<div class="inspector-section"><div class="section-title">SERVICE <span>${esc(packet.service.service || '')}</span></div>${property('Message', packet.service.message || '—')}${packet.service.request ? property('Request', packet.service.request) : ''}${packet.service.method ? property('Method', packet.service.method) : ''}${packet.service.path ? property('Path', packet.service.path) : ''}${packet.service.query ? property('Query', packet.service.query) : ''}${packet.service.response ? property('Response', packet.service.response) : ''}${packet.service.assigned_ip ? property('Assigned IP', packet.service.assigned_ip) : ''}${packet.service.offered_ip ? property('Offered IP', packet.service.offered_ip) : ''}${packet.service.filename ? property('File', packet.service.filename) : ''}${packet.service.bytes ? property('Bytes', packet.service.bytes) : ''}</div>` : ''}${packet.security ? `<div class="inspector-section"><div class="section-title">SECURITY <span>${esc(packet.security.decision || 'ALLOW')}</span></div>${property('Firewall', packet.security.firewall || '—')}${packet.security.firewall_rule ? property('Firewall rule', packet.security.firewall_rule) : ''}${property('ACL', packet.security.acl || '—')}${packet.security.acl_name ? property('ACL name', packet.security.acl_name) : ''}${property('ARP', packet.security.arp || 'NORMAL')}${property('Traffic', packet.security.traffic || 'NORMAL')}${property('Drop reason', packet.security.reason || '—')}</div>` : ''}${journeyData ? `<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${esc(journeyData.status)}</span></div><div class="diagnostic-path">${esc((journeyData.route || []).join(' ↓ '))}</div>${(journeyData.hops || []).map(hop => `<div class="journey-step"><b>${esc(hop.device)} · ${esc(hop.action)}</b><div>interface ${esc(hop.interface)} · queue ${hop.queue_length == null ? '—' : hop.queue_length} · ${hop.latency_ms == null ? '' : fmt(hop.latency_ms, 2) + ' ms'}</div><span class="hint">${esc((hop.events || []).join(', ') || hop.result)}</span></div>`).join('')}</div>` : ''}${explanation ? `<div class="inspector-section"><div class="section-title">WHY?</div>${explanation.failed ? `<div class="drop-reason">${esc(explanation.reason)}</div><p>${esc(explanation.explanation)}</p><div class="console-output">${esc(JSON.stringify(explanation.details, null, 1))}</div>` : '<p class="hint">This packet was not dropped.</p>'}</div>` : ''}${dropReason ? `<div class="drop-reason">DROP · ${esc(dropReason)}</div>` : ''}<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${journey.length} events</span></div>${journey.map((event, index) => `<div class="journey-step"><b>${index + 1}. ${esc(eventName(event.event))}</b><div>${esc(event.message)}</div><span class="hint">${clock(event.time)} · ${esc(event.component || 'simulator')}</span></div>`).join('') || '<p class="hint">No packet events recorded.</p>'}</div><button data-action="back-packets">Back to packet viewer</button>`;
 }
-function eventInspector(event) { return `<div class="device-hero"><div class="device-symbol">!</div><div><b>${esc(event.event)}</b><span>${clock(event.time)} simulation time</span></div></div><div class="console-output">${esc(JSON.stringify(event, null, 2))}</div>`; }
+function eventInspector(rawEvent) {
+  // Structured events carry their payload under `details`; merge it with the
+  // top-level fields so the panel can render the simulator's real values.
+  const details = rawEvent.details || {};
+  const event = { ...details, ...rawEvent, previous_route: rawEvent.previous_route || details.old_route, new_route: rawEvent.new_route || details.new_route };
+  const eventTypes = {
+    'LINK_FAILED': { icon: '⚠', color: 'text-red-600', label: 'Link Failure' },
+    'NODE_FAILED': { icon: '⚠', color: 'text-red-600', label: 'Node Failure' },
+    'FAILURE_DETECTED': { icon: '🔍', color: 'text-orange-600', label: 'Failure Detected' },
+    'ROUTE_RECALCULATED': { icon: '🔄', color: 'text-blue-600', label: 'Route Recalculated' },
+    'TRAFFIC_REROUTED': { icon: '➡', color: 'text-purple-600', label: 'Traffic Rerouted' },
+    'LINK_RECOVERED': { icon: '✓', color: 'text-green-600', label: 'Link Recovered' },
+    'NODE_RECOVERED': { icon: '✓', color: 'text-green-600', label: 'Node Recovered' },
+    'PACKET_DELIVERED': { icon: '✓', color: 'text-green-600', label: 'Packet Delivered' },
+    'PACKET_DROPPED': { icon: '✗', color: 'text-red-600', label: 'Packet Dropped' },
+    'PACKET_SENT': { icon: '➤', color: 'text-ink-600', label: 'Packet Sent' },
+    'PACKET_GENERATED': { icon: '◆', color: 'text-ink-600', label: 'Packet Generated' },
+    'TRAFFIC_STARTED': { icon: '▶', color: 'text-blue-600', label: 'Traffic Started' },
+    'FLOW_COMPLETED': { icon: '✓', color: 'text-green-600', label: 'Flow Completed' },
+    'FLOW_FAILED': { icon: '✗', color: 'text-red-600', label: 'Flow Failed' },
+  };
+  const info = eventTypes[event.event] || { icon: '•', color: 'text-ink-600', label: event.event };
+  
+  // Build detail rows based on event type
+  let detailsHtml = '';
+  if (event.event === 'LINK_FAILED' || event.event === 'LINK_RECOVERED') {
+    const link = state.links.find(l => [event.link, event.component].some(ref => ref === `${l.source}↔${l.target}` || ref === `${l.source}-${l.target}` || ref === `${l.target}-${l.source}` || ref === `${l.target}↔${l.source}`));
+    if (link) {
+      detailsHtml = `
+        <div class="inspector-section">
+          <div class="section-title">${event.event === 'LINK_FAILED' ? 'Failed Link' : 'Recovered Link'}</div>
+          <div class="property"><label>Endpoints</label><span>${esc(link.source)} ↔ ${esc(link.target)}</span></div>
+          <div class="property"><label>Bandwidth</label><span>${fmt(link.bandwidth)} Mbps</span></div>
+          <div class="property"><label>Latency</label><span>${fmt(link.latency)} ms</span></div>
+          <div class="property"><label>Status</label><span class="${event.event === 'LINK_FAILED' ? 'status-down' : 'status-up'}">${esc(link.status)}</span></div>
+        </div>`;
+    }
+  }
+  if (event.event === 'ROUTE_RECALCULATED') {
+    detailsHtml = `
+      <div class="inspector-section">
+        <div class="section-title">Route Change Details</div>
+        <div class="property"><label>Source</label><span>${esc(event.source || event.component?.split('→')[0] || '—')}</span></div>
+        <div class="property"><label>Destination</label><span>${esc(event.destination || event.component?.split('→')[1] || '—')}</span></div>
+        <div class="property"><label>Reason</label><span>${esc(event.message)}</span></div>
+        ${event.previous_route ? `<div class="property"><label>Previous Route</label><span class="route-path">${esc(event.previous_route.join(' → '))}</span></div>` : ''}
+        ${event.new_route ? `<div class="property"><label>New Route</label><span class="route-path">${esc(event.new_route.join(' → '))}</span></div>` : ''}
+        ${event.route_cost != null ? `<div class="property"><label>Route Cost</label><span>${fmt(event.route_cost, 2)}</span></div>` : ''}
+        ${event.route_status ? `<div class="property"><label>Status</label><span class="route-status ${event.route_status === 'HEALTHY' ? 'status-up' : event.route_status === 'REROUTED' ? 'status-warning' : 'status-down'}">${esc(event.route_status)}</span></div>` : ''}
+      </div>`;
+  }
+  if (event.event === 'PACKET_DELIVERED') {
+    detailsHtml = `
+      <div class="inspector-section">
+        <div class="section-title">Delivery Details</div>
+        <div class="property"><label>Packet ID</label><span>#${esc(event.packet_id || '—')}</span></div>
+        <div class="property"><label>Source</label><span>${esc(event.source || '—')}</span></div>
+        <div class="property"><label>Destination</label><span>${esc(event.destination || '—')}</span></div>
+        ${event.actual_route ? `<div class="property"><label>Actual Route</label><span class="route-path">${esc(event.actual_route.join(' → '))}</span></div>` : ''}
+        ${event.latency != null ? `<div class="property"><label>End-to-End Latency</label><span>${fmt(event.latency * 1000, 2)} ms</span></div>` : ''}
+        ${event.route_cost != null ? `<div class="property"><label>Route Cost</label><span>${fmt(event.route_cost, 2)}</span></div>` : ''}
+      </div>`;
+  }
+  if (event.event === 'PACKET_DROPPED') {
+    detailsHtml = `
+      <div class="inspector-section">
+        <div class="section-title">Drop Details</div>
+        <div class="property"><label>Packet ID</label><span>#${esc(event.packet_id || '—')}</span></div>
+        <div class="property"><label>Source</label><span>${esc(event.source || '—')}</span></div>
+        <div class="property"><label>Destination</label><span>${esc(event.destination || '—')}</span></div>
+        <div class="property"><label>Drop Reason</label><span class="drop-reason">${esc(event.reason || 'Unknown')}</span></div>
+        ${event.route ? `<div class="property"><label>Route (partial)</label><span class="route-path">${esc(event.route.join(' → '))}</span></div>` : ''}
+      </div>`;
+  }
+  if (event.event === 'FAILURE_DETECTED') {
+    detailsHtml = `
+      <div class="inspector-section">
+        <div class="section-title">Detection Details</div>
+        <div class="property"><label>Component</label><span>${esc(event.component || '—')}</span></div>
+        ${event.failure_time != null ? `<div class="property"><label>Failure Time</label><span>${fmt(event.failure_time, 2)}s</span></div>` : ''}
+        <div class="property"><label>Detection Time</label><span>${fmt(event.detection_time, 2)}s</span></div>
+        ${event.detection_delay != null ? `<div class="property"><label>Detection Delay</label><span>${fmt(event.detection_delay, 2)}s</span></div>` : ''}
+      </div>`;
+  }
+  if (event.event === 'TRAFFIC_REROUTED') {
+    detailsHtml = `
+      <div class="inspector-section">
+        <div class="section-title">Reroute Details</div>
+        <div class="property"><label>Flow ID</label><span>${esc(event.flow_id || '—')}</span></div>
+        <div class="property"><label>New Route</label><span class="route-path">${event.route ? esc(event.route.join(' → ')) : '—'}</span></div>
+      </div>`;
+  }
+  return `
+    <div class="device-hero">
+      <div class="device-symbol" style="color:${info.color.replace('text-', '')}">${info.icon}</div>
+      <div>
+        <b style="color:${info.color.replace('text-', '')}">${esc(info.label)}</b>
+        <span>${clock(event.time)} simulation time</span>
+      </div>
+    </div>
+    <div class="inspector-section">
+      <div class="section-title">Event Information</div>
+      <div class="property"><label>Event Type</label><span>${esc(event.event)}</span></div>
+      <div class="property"><label>Message</label><span class="hint">${esc(event.message)}</span></div>
+      <div class="property"><label>Component</label><span>${esc(event.component || '—')}</span></div>
+      ${event.flow_id ? `<div class="property"><label>Flow ID</label><span>${esc(event.flow_id)}</span></div>` : ''}
+    </div>
+    ${detailsHtml}
+    <div class="inspector-section">
+      <div class="section-title">Raw Event Data</div>
+      <div class="console-output">${esc(JSON.stringify(event, null, 2))}</div>
+    </div>`;
+}
 function transportLabInspector() {
   const flows = state.transport?.flows || [];
   const source = selected?.kind === 'device' ? selected.id : (flows[0]?.source || state.devices?.[0]?.id || '');
@@ -1107,6 +1234,104 @@ function bindInspectorActions() {
       if (action === 'console') { selected = { kind: 'console', id: selected.id }; renderConsole(); }
     });
   });
+  // Routing table entry click handler for route highlighting
+  inspectorBody.querySelectorAll('[data-route-idx]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.routeIdx);
+      const rows = state.routing_tables?.[selected.id] || [];
+      const entry = rows[idx];
+      if (entry && entry.route_path && entry.route_path.length >= 2) {
+        highlightRouteOnCanvas(entry.route_path);
+        toast(`Route: ${entry.route_path.join(' → ')}`);
+      } else {
+        toast('No path available for this route');
+      }
+    });
+  });
+  // Diagnostic routing-table row click handler for path highlighting
+  inspectorBody.querySelectorAll('[data-diagnostic-route]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const entry = (state.diagnostic_result?.entries || [])[parseInt(el.dataset.diagnosticRoute, 10)];
+      if (entry && entry.route_path && entry.route_path.length >= 2) {
+        highlightRouteOnCanvas(entry.route_path);
+        toast(`Route: ${entry.route_path.join(' → ')}`);
+      } else {
+        toast('No path available for this route');
+      }
+    });
+  });
+  // MAC table entry click handler for link highlighting
+  inspectorBody.querySelectorAll('[data-mac]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const mac = el.dataset.mac;
+      const port = el.dataset.macPort;
+      if (!mac || !port || !state) return;
+      const existing = routeLayer.querySelector('#macHighlight');
+      if (existing) existing.remove();
+      const device = state.devices.find(d => d.id === selected.id);
+      const owner = (state.devices || []).find(d => d.id !== selected.id && (d.interfaces || []).some(i => i.mac_address === mac));
+      let found = null;
+      if (device) {
+        const attached = (state.links || []).filter(l => l.source === device.id || l.target === device.id);
+        const link = attached.find(l => owner
+          ? (l.source === owner.id || l.target === owner.id)
+          : ((l.source === device.id && l.interface_a === port) || (l.target === device.id && l.interface_b === port)));
+        if (link) {
+          const src = state.devices.find(d => d.id === link.source);
+          const tgt = state.devices.find(d => d.id === link.target);
+          if (src && tgt) found = { link, src, tgt };
+        }
+      }
+      if (found) {
+        const layer = routeLayer.querySelector('#macHighlight') || ((() => {
+          const g = document.createElementNS(SVG_NS, 'g');
+          g.setAttribute('id', 'macHighlight');
+          g.setAttribute('class', 'user-highlight');
+          routeLayer.appendChild(g);
+          return g;
+        })());
+        layer.innerHTML =
+          '<line class="mac-highlight" x1="' + esc(String(found.src.x)) + '" y1="' + esc(String(found.src.y)) + '" x2="' + esc(String(found.tgt.x)) + '" y2="' + esc(String(found.tgt.y)) + '" stroke="#38BDF8" stroke-width="4" stroke-dasharray="6,3" opacity="0.95"/>'
+          + '<circle cx="' + esc(String((found.src.x + found.tgt.x) / 2)) + '" cy="' + esc(String((found.src.y + found.tgt.y) / 2)) + '" r="4" fill="#38BDF8" class="mac-highlight"/>';
+        toast('MAC ' + mac + ' -> Port ' + port + ' (Link: ' + found.link.source + ' <-> ' + found.link.target + ')');
+      } else {
+        toast('MAC ' + mac + ' learned on port ' + port);
+      }
+    });
+  });
+}
+function routeStillCurrent(routePath) {
+  const key = routePath.join('>');
+  const rows = Object.values(state.routing_tables || {}).flat();
+  if (rows.some(r => Array.isArray(r.route_path) && r.route_path.join('>') === key)) return true;
+  return (state.flows || []).some(f => Array.isArray(f.route) && f.route.join('>') === key);
+}
+function highlightRouteOnCanvas(routePath) {
+  // Clear both route and MAC highlights before drawing a new route highlight
+  const existingHighlights = routeLayer.querySelectorAll('.user-highlight');
+  existingHighlights.forEach(el => el.remove());
+  highlightedRoutePath = routePath ? [...routePath] : null;
+  if (!routePath) return;
+  const deviceMap = new Map((state?.devices || []).map(d => [d.id, d]));
+  for (let i = 0; i < routePath.length - 1; i++) {
+    const from = routePath[i];
+    const to = routePath[i + 1];
+    const fromDev = deviceMap.get(from);
+    const toDev = deviceMap.get(to);
+    if (fromDev && toDev) {
+      const line = document.createElementNS(SVG_NS, 'line');
+      line.setAttribute('x1', fromDev.x);
+      line.setAttribute('y1', fromDev.y);
+      line.setAttribute('x2', toDev.x);
+      line.setAttribute('y2', toDev.y);
+      line.setAttribute('class', 'user-highlight route-highlight');
+      line.setAttribute('stroke', '#FF5E1F');
+      line.setAttribute('stroke-width', '3');
+      line.setAttribute('stroke-dasharray', '8,4');
+      line.setAttribute('opacity', '0.85');
+      routeLayer.appendChild(line);
+    }
+  }
 }
 function renderConsole() { const d = selected.id; inspectorBody.innerHTML = `<div class="device-hero"><div class="device-symbol">›_</div><div><b>${esc(d)} console</b><span>Real backend commands only</span></div></div><div class="console-output" id="consoleOutput">${esc(d)}&gt; _</div><div class="console-form"><input id="consoleInput" value="show interfaces"/><button data-console>Run</button></div><div class="button-row"><button data-action="close-console">Back to device</button></div>`; inspectorBody.querySelector('[data-console]').addEventListener('click', runConsole); inspectorBody.querySelector('[data-action="close-console"]').addEventListener('click', () => { selected = { kind: 'device', id: d }; renderInspector(); }); }
 async function runConsole() { const command = $('consoleInput').value; const output = $('consoleOutput'); output.textContent += `\n${command}`; try { const result = await api('console', { id: selected.id, command }); output.textContent += `\n${result.state.output}`; } catch (error) { output.textContent += `\n${error.message}`; } }
@@ -1126,11 +1351,15 @@ document.querySelectorAll('[data-diagnostic]').forEach(button => button.addEvent
     if (action === 'ping' || action === 'traceroute') {
       if (!destination || !state.devices.some(device => device.id === destination)) throw new Error('Select a destination device.');
       await api(action, { source, destination, count: 4 });
+    } else if (action === 'route') {
+      const device = state.devices.find(item => item.id === source);
+      if (!device || device.type !== 'router') throw new Error('Select a router to inspect its routing table.');
+      await api('routing_table', { id: source });
     } else {
       await api(action === 'arp' ? 'arp_table' : 'mac_table', { id: source });
     }
     state.packetListView = false; diagnosticView = true; transportView = false; openInspector();
-  } catch (error) { }
+  } catch (error) { toast(error.message, true); }
 }));
 document.querySelectorAll('.palette-item').forEach(item => item.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', item.dataset.type)));
 canvas.addEventListener('dragover', e => e.preventDefault()); canvas.addEventListener('drop', e => { e.preventDefault(); const type = e.dataTransfer.getData('text/plain'); if (type) { const p = canvasPoint(e); api('add_device', { type, x: p.x, y: p.y }); } });
@@ -1145,9 +1374,9 @@ $('presetSelect').addEventListener('change', e => { clearAllPacketVisuals(); api
 $('saveBtn').addEventListener('click', async () => { const data = await api('export'); const blob = new Blob([JSON.stringify(data.state.document, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'netadapt-lab.json'; a.click(); URL.revokeObjectURL(a.href); toast('Topology saved'); });
 $('openBtn').addEventListener('click', () => $('fileInput').click()); $('fileInput').addEventListener('change', async e => { const file = e.target.files[0]; if (file) { clearAllPacketVisuals(); api('import', { document: JSON.parse(await file.text()) }); } e.target.value = ''; });
 $('undoBtn').addEventListener('click', () => api('undo')); $('redoBtn').addEventListener('click', () => api('redo'));
-$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('workspaceSpeed').value = e.target.value; packetAnimator.updateSpeed(); });
+$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); if ($('workspaceSpeed')) $('workspaceSpeed').value = e.target.value; packetAnimator.updateSpeed(); });
 document.querySelectorAll('[data-workspace-control]').forEach(button => button.addEventListener('click', async () => { const control = button.dataset.workspaceControl; if (control === 'play') { await api('running', { value: true }); play(); } else if (control === 'step') { stop(); await api('step'); } else { stop(); await api('running', { value: false }); if (control === 'reset') { clearAllPacketVisuals(); await api('reset'); } } }));
-$('workspaceSpeed').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('speedSelect').value = e.target.value; packetAnimator.updateSpeed(); });
+$('workspaceSpeed')?.addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('speedSelect').value = e.target.value; packetAnimator.updateSpeed(); });
 $('fitBtn').addEventListener('click', () => { if (!state.devices.length) return; const xs = state.devices.map(d => d.x), ys = state.devices.map(d => d.y), minX = Math.min(...xs) - 100, maxX = Math.max(...xs) + 100, minY = Math.min(...ys) - 100, maxY = Math.max(...ys) + 100; canvas.setAttribute('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`); });
 async function play() { stop(); playTimer = setInterval(async () => { if (!state?.running) { stop(); return; } try { await api('step'); } catch (e) { stop(); } }, Math.max(120, 600 / (state?.speed || 1))); } function stop() { if (playTimer) clearInterval(playTimer); playTimer = null; }
 document.addEventListener('keydown', e => { if ((e.key === 'Delete' || e.key === 'Backspace') && selected?.kind === 'device' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); api('delete_device', { id: selected.id }); } if (e.key === 'Escape') { closeInspector(); } });

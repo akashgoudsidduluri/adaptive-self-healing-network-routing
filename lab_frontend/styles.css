@@ -879,6 +879,27 @@ select:hover, input:hover {
   pointer-events: none;
 }
 
+/* User-highlighted routes on canvas */
+.route-highlight {
+  pointer-events: none;
+  animation: routePulse 2s ease-in-out infinite;
+}
+
+.mac-highlight {
+  pointer-events: none;
+  animation: macPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes routePulse {
+  0%, 100% { opacity: 0.8; stroke-width: 3; }
+  50% { opacity: 1; stroke-width: 4; }
+}
+
+@keyframes macPulse {
+  0%, 100% { opacity: 0.9; stroke-width: 4; }
+  50% { opacity: 1; stroke-width: 5; }
+}
+
 /* Animated Packets - Small distinct orange circles with white center */
 .packet {
   cursor: pointer;
@@ -1151,6 +1172,68 @@ select:hover, input:hover {
   padding: 8px 10px;
   margin: 8px 0;
   background: #FFFFFF;
+  cursor: default;
+}
+
+.interface-card.clickable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.interface-card.clickable:hover {
+  border-color: var(--forest-border);
+  box-shadow: 0 0 0 2px var(--forest-subtle);
+}
+
+.interface-card.clickable .route-path {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.diagnostic-table tr.clickable {
+  cursor: pointer;
+}
+
+.diagnostic-table tr.clickable:hover td {
+  background: var(--forest-subtle);
+}
+
+.diagnostic-table.route-table td:first-child {
+  min-width: 150px;
+}
+
+.route-path {
+  font-family: ui-monospace, 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.route-status {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.route-status.status-up {
+  background: var(--forest-subtle);
+  color: var(--forest);
+  border: 1px solid var(--forest-border);
+}
+
+.route-status.status-down {
+  background: var(--red-subtle);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+}
+
+.route-status.status-warning {
+  background: var(--amber-subtle);
+  color: var(--amber);
+  border: 1px solid var(--orange-border);
 }
 
 .interface-card .interface-head {

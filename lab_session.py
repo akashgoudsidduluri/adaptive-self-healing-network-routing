@@ -11,6 +11,7 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import json
+import math
 import re
 
 from challenges import ChallengeEngine
@@ -701,6 +702,87 @@ class LabSession:
                 "cleared": removed,
                 "message": f"Cleared {removed} MAC entr{'y' if removed == 1 else 'ies'}.",
             })
+
+    def _routing_table_entries(self, router_name: str) -> List[Dict[str, Any]]:
+        """Enrich the live routing table with route paths and reachability.
+
+        Routing table destinations are device host routes (``ip/32``), so the
+        path has to be resolved against the destination device, not against the
+        address string.  Destinations that lost every path stay listed as
+        UNREACHABLE instead of silently disappearing.
+        """
+        table = self.simulator.routing_table(router_name)
+        entries = {entry.destination_network: entry for entry in table.entries}
+        routes: List[Dict[str, Any]] = []
+        for destination, target in self.simulator.topology.devices.items():
+            if destination == router_name or not target.interfaces:
+                continue
+            address = target.interfaces[0].ip_address
+            if not address:
+                continue
+            entry = entries.get(address)
+            try:
+                path, cost = self.simulator.router.shortest_path(
+                    self.simulator.topology, router_name, destination
+                )
+            except ValueError:
+                path, cost = [], None
+            routes.append({
+                "destination_network": address,
+                "destination": destination,
+                "prefix": 32,
+                "next_hop": entry.next_hop if entry else (path[1] if len(path) > 1 else None),
+                "outgoing_interface": entry.outgoing_interface if entry else None,
+                "metric": entry.metric if entry else cost,
+                "route_path": path,
+                "status": "REACHABLE" if path else "UNREACHABLE",
+            })
+        return routes
+
+    def get_routing_table(self, router_name: str) -> Dict[str, Any]:
+        with self.lock:
+            if router_name not in self.simulator.topology.devices:
+                raise LabError(f"Unknown device: {router_name}")
+            device = self.simulator.topology.get_device(router_name)
+            if not device.is_router:
+                raise LabError(f"{router_name} is not a router")
+            routes = self._routing_table_entries(router_name)
+            return {
+                "type": "routing_table",
+                "title": f"ROUTING TABLE · {router_name}",
+                "device": router_name,
+                "algorithm": self.simulator.get_router_algorithm(),
+                "weights": self.simulator.get_routing_weights(),
+                "entries": routes,
+            }
+
+    def inspect_routing_table(self, router_name: str) -> Dict[str, Any]:
+        with self.lock:
+            result = self.get_routing_table(router_name)
+            return self._set_diagnostic_result(result)
+
+    def get_flow_routes(self) -> Dict[str, Any]:
+        with self.lock:
+            flows = []
+            for flow in self.simulator.active_flows.values():
+                flows.append({
+                    "flow_id": flow.flow_id,
+                    "source": flow.source,
+                    "destination": flow.destination,
+                    "traffic_type": flow.traffic_type,
+                    "current_route": flow.current_route,
+                    "previous_route": flow.previous_route,
+                    "route_cost": flow.route_cost if math.isfinite(flow.route_cost) else None,
+                    "route_status": flow.route_status,
+                    "packets_sent": flow.packets_sent,
+                    "packets_delivered": flow.packets_delivered,
+                    "packets_dropped": flow.packets_dropped,
+                    "status": flow.status,
+                })
+            return {
+                "type": "flow_routes",
+                "flows": flows,
+            }
 
     def create_transport(self, protocol: str, source: str, destination: str, source_port: int = 5000, destination_port: int = 8080, payload_size: int = 1000, initial_cwnd: int = 1, receiver_window: int = 8, ssthresh: float = 16.0, timeout: float = 0.1, traffic_class: str = "HTTP") -> Dict[str, Any]:
         with self.lock:
@@ -1712,7 +1794,21 @@ class LabSession:
             routing_tables = {}
             for device in topology.devices.values():
                 if device.is_router:
-                    routing_tables[device.name] = [entry.to_dict() for entry in self.simulator.routing_table(device.name).entries]
+                    routing_tables[device.name] = self._routing_table_entries(device.name)
+            # Build enhanced event details for self-healing observability
+            events = [event.to_dict() for event in self.simulator.event_logger.get_events(limit=200)]
+            # Attach flow context to events where available
+            flow_map = {f.flow_id: f for f in self.simulator.active_flows.values()}
+            for evt in events:
+                if evt.get("flow_id") and evt["flow_id"] in flow_map:
+                    flow = flow_map[evt["flow_id"]]
+                    if evt.get("event") == "ROUTE_RECALCULATED":
+                        evt["previous_route"] = evt.get("old_route") or flow.previous_route
+                        evt["new_route"] = evt.get("new_route") or flow.current_route
+                        evt["route_cost"] = flow.route_cost
+                        evt["route_status"] = flow.route_status
+                    if evt.get("event") in ("PACKET_DELIVERED", "PACKET_DROPPED", "PACKET_SENT", "PACKET_GENERATED"):
+                        evt["actual_route"] = evt.get("route") or flow.current_route
             return {
                 "name": self.document.get("name", "Untitled Network"),
                 "time": self.simulator.time,
@@ -1733,7 +1829,7 @@ class LabSession:
                 },
                 "queue": {"length": queue.get("current_queue_length", 0), "max": queue.get("max_queue_length", 0), "average_wait": queue.get("average_waiting_time", 0.0)},
                 "metrics": {"sent": metrics["packets_sent"], "delivered": metrics["packets_delivered"], "dropped": metrics["packets_dropped"], "pdr": metrics["packet_delivery_ratio"], "latency": metrics["average_latency"] * 1000, "throughput": metrics["throughput"], "route_changes": sum(1 for event in self.simulator.event_logger.events if event.event_type == "ROUTE_RECALCULATED")},
-                "events": [event.to_dict() for event in self.simulator.event_logger.get_events(limit=40)],
+                "events": events,
                 "routing": {"algorithm": self.simulator.get_router_algorithm(), "weights": self.simulator.get_routing_weights()},
                 "qos": {
                     "scheduler": self.simulator.scheduler_name,

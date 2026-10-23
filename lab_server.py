@@ -204,6 +204,8 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.inspect_mac(str(payload["id"]))
             elif action == "clear_mac":
                 result = SESSION.clear_mac(str(payload["id"]))
+            elif action == "routing_table":
+                result = SESSION.inspect_routing_table(str(payload["id"]))
             elif action == "service_install":
                 result = SESSION.install_service(
                     str(payload["name"]), str(payload["id"]), payload.get("config", {})
@@ -337,6 +339,10 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.network_report(str(payload.get("format", "json")))
             elif action == "console":
                 result = SESSION.console(str(payload["id"]), str(payload["command"]))
+            elif action == "route_details":
+                result = {"ok": True, "state": SESSION.get_routing_table(str(payload["router"]))}
+            elif action == "flow_routes":
+                result = {"ok": True, "state": SESSION.get_flow_routes()}
             else:
                 raise LabError(f"Unknown action: {action}")
             self._json({"ok": True, "state": result})

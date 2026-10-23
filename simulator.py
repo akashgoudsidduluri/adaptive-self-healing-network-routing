@@ -384,7 +384,9 @@ class NetworkSimulator:
             traffic_type=traffic_type,
             packet_count=packet_count,
             route=route,
-            route_cost=cost,
+            # Keep the internal cost as infinity so route comparisons still work,
+            # but never serialise a non-finite number into the event payload.
+            route_cost=cost if route else None,
         )
 
         return flow
@@ -537,6 +539,36 @@ class NetworkSimulator:
     # ------------------------------------------------------------------
     # Packet processing
     # ------------------------------------------------------------------
+    def _learn_path_macs(self, path: List[str]) -> None:
+        """Learn source MACs at every switch a routed packet traverses.
+
+        The live lab forwards packets as L3 paths, so this is the point where a
+        switch really sees the frame on its ingress port.  Only new or moved
+        entries are logged to keep the timeline readable.
+        """
+        for index in range(1, len(path) - 1):
+            switch = self.topology.get_device(path[index])
+            if switch is None or not switch.is_switch or switch.status != "UP":
+                continue
+            previous = self.topology.get_device(path[index - 1])
+            if previous is None or not previous.interfaces:
+                continue
+            source = previous.interfaces[0]
+            if not source.mac_address:
+                continue
+            port = switch.interfaces[0].interface_id if switch.interfaces else "eth0"
+            if switch.lookup_mac(source.mac_address) == port:
+                continue
+            switch.learn_mac(source.mac_address, port)
+            self._log_event(
+                EventType.MAC_LEARNED,
+                f"Switch {switch.name} learned {source.mac_address} on {port}",
+                component=switch.name,
+                source_mac=source.mac_address,
+                interface_id=port,
+                device=previous.name,
+            )
+
     def process_next_packet(self) -> Packet | None:
         if self.scheduler.empty():
             return None
@@ -586,6 +618,8 @@ class NetworkSimulator:
                 f"Packet {packet.packet_id} dropped: no route {packet.source}→{packet.destination}",
                 flow_id=flow.flow_id if flow else None,
                 packet_id=packet.packet_id,
+                source=packet.source,
+                destination=packet.destination,
                 reason="NO_ROUTE",
             )
 
@@ -631,6 +665,7 @@ class NetworkSimulator:
             flow.route_status = "HEALTHY"
 
         packet.route = path
+        self._learn_path_macs(path)
         # Stage 10 policy evaluation happens after the real route lookup and
         # before transmission/loss.  A denied packet still records a normal
         # simulator metric, while the actual service/security layer supplies
@@ -660,6 +695,8 @@ class NetworkSimulator:
                 f"Packet {packet.packet_id} blocked by simulated security policy",
                 flow_id=flow.flow_id if flow else None,
                 packet_id=packet.packet_id,
+                source=packet.source,
+                destination=packet.destination,
                 reason=security_decision.get("reason") or "FIREWALL_BLOCK",
                 security=security_decision,
                 route=path,
@@ -669,6 +706,8 @@ class NetworkSimulator:
                 f"Packet {packet.packet_id} dropped by simulated security policy",
                 flow_id=flow.flow_id if flow else None,
                 packet_id=packet.packet_id,
+                source=packet.source,
+                destination=packet.destination,
                 reason=security_decision.get("reason") or "FIREWALL_BLOCK",
                 route=path,
             )
@@ -724,6 +763,8 @@ class NetworkSimulator:
                 f"Packet {packet.packet_id} dropped (loss prob {loss_probability:.2%})",
                 flow_id=flow.flow_id if flow else None,
                 packet_id=packet.packet_id,
+                source=packet.source,
+                destination=packet.destination,
                 reason="PACKET_LOSS",
                 route=path,
                 loss_probability=loss_probability,
@@ -754,6 +795,8 @@ class NetworkSimulator:
                 f"Packet {packet.packet_id} delivered via {' → '.join(path)} latency={packet.latency*1000:.1f}ms",
                 flow_id=flow.flow_id if flow else None,
                 packet_id=packet.packet_id,
+                source=packet.source,
+                destination=packet.destination,
                 route=path,
                 route_cost=route_cost,
                 latency=packet.latency,
@@ -971,8 +1014,10 @@ class NetworkSimulator:
         failure_time = self.time
         self._failed_links[key] = failure_time
 
-        # Record recovery tracking
-        comp_str = f"{u}-{v}"
+        # Record recovery tracking.  Use the same normalised component name as
+        # the heartbeat detector so detection/recalculation/recovery updates all
+        # land on this record regardless of the order the caller named the link.
+        comp_str = f"{key[0]}-{key[1]}"
         rec = RecoveryRecord(
             failure_time=failure_time,
             component=comp_str,
@@ -1009,7 +1054,7 @@ class NetworkSimulator:
 
         self.topology.recover_link(u, v)
 
-        comp_str = f"{u}-{v}"
+        comp_str = f"{key[0]}-{key[1]}"
         recovery_time = self.time
 
         if key in self._failed_links:
