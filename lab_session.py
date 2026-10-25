@@ -516,7 +516,7 @@ class LabSession:
             before = len(self.simulator.event_logger.events)
             packet = self.simulator.process_next_packet()
             if packet is None:
-                if self.simulator._failed_links or self.simulator._failed_nodes:
+                if self.simulator._failed_links or self.simulator._failed_nodes or (self.simulator.shaper.enabled and self.simulator.shaper.has_waiting_packets()):
                     self.simulator.tick(max(0.1, self.simulator.heartbeat_interval))
                 else:
                     self.running = False
@@ -542,6 +542,8 @@ class LabSession:
                     "route": list(packet.route),
                     "status": packet.delivery_status,
                     "latency": packet.latency,
+                    "shaping_delay": getattr(packet, "shaping_delay", 0.0),
+                    "queue_wait_time": packet.queue_wait_time,
                     "drop_reason": drop_reason,
                     "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
                     "current_device": packet.destination if packet.delivery_status == "DELIVERED" else packet.source,
@@ -601,6 +603,53 @@ class LabSession:
                 self.simulator.set_wfq_weights(
                     {str(name): float(value) for name, value in weights.items()}
                 )
+            self._update_document()
+            return self.state()
+
+    def configure_shaping(
+        self,
+        rate: Optional[float] = None,
+        capacity: Optional[float] = None,
+        max_queue_size: Optional[int] = None,
+        unit: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        initial_tokens: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Configure the traffic shaper."""
+        with self.lock:
+            self._record()
+            try:
+                self.simulator.configure_shaper(
+                    rate=rate,
+                    capacity=capacity,
+                    max_queue_size=max_queue_size,
+                    unit=unit,
+                    enabled=enabled,
+                    initial_tokens=initial_tokens,
+                )
+            except ValueError as exc:
+                raise LabError(str(exc)) from exc
+            self._update_document()
+            return self.state()
+
+    def toggle_shaping(self, enabled: Optional[bool] = None) -> Dict[str, Any]:
+        """Enable or disable traffic shaping."""
+        with self.lock:
+            self._record()
+            if enabled is None:
+                enabled = not self.simulator.shaper.enabled
+            if enabled:
+                self.simulator.enable_shaper()
+            else:
+                self.simulator.disable_shaper()
+            self._update_document()
+            return self.state()
+
+    def reset_shaping(self) -> Dict[str, Any]:
+        """Reset the traffic shaper state."""
+        with self.lock:
+            self._record()
+            self.simulator.reset_shaper()
             self._update_document()
             return self.state()
 
@@ -1730,6 +1779,8 @@ class LabSession:
                 "next_hop": packet.route[1] if packet.delivery_status == "PENDING" and len(packet.route) > 1 else None,
                 "queue_wait_time": packet.queue_wait_time,
                 "queue_wait_ms": packet.queue_wait_time * 1000 if packet.queue_wait_time is not None else None,
+                "shaping_delay": getattr(packet, "shaping_delay", 0.0),
+                "shaping_delay_ms": getattr(packet, "shaping_delay", 0.0) * 1000.0,
                 "drop_reason": drop_reason,
                 "journey": events,
             }
@@ -1790,7 +1841,7 @@ class LabSession:
                 })
             flows = []
             for flow in self.simulator.active_flows.values():
-                flows.append({"id": flow.flow_id, "source": flow.source, "destination": flow.destination, "route": flow.current_route, "status": flow.status, "delivered": flow.packets_delivered, "dropped": flow.packets_dropped})
+                flows.append({"id": flow.flow_id, "source": flow.source, "destination": flow.destination, "route": flow.current_route, "status": flow.status, "delivered": flow.packets_delivered, "dropped": flow.packets_dropped, "pps": flow.pps, "traffic_type": flow.traffic_type, "packet_count": flow.packet_count})
             routing_tables = {}
             for device in topology.devices.values():
                 if device.is_router:
@@ -1836,6 +1887,7 @@ class LabSession:
                     "priorities": self.simulator.get_priority_config(),
                     "weights": self.simulator.get_wfq_weights(),
                 },
+                "shaping": self.simulator.get_shaper_state(),
                 "routing_tables": routing_tables,
                 "services": {
                     **self.simulator.service_state(),

@@ -25,6 +25,7 @@ from events import EventLogger, EventType
 from protocols import ProtocolPacket, ProtocolStack, SwitchFrame
 from transport import TransportLayer
 from services_security import ServiceSecurityLayer
+from traffic_shaper import TokenBucketShaper
 
 
 @dataclass
@@ -123,6 +124,13 @@ class NetworkSimulator:
         self.services = ServiceSecurityLayer(self)
         self.service_security = self.services
         self.arp = self.protocols.arp
+        self.shaper = TokenBucketShaper(
+            rate=5.0,
+            capacity=10.0,
+            max_queue_size=50,
+            unit="packets",
+            enabled=False,
+        )
 
         # Heartbeat / health check simulation
         self.heartbeat_interval = heartbeat_interval
@@ -252,7 +260,6 @@ class NetworkSimulator:
 
         self.next_packet_id += 1
         self.packets.append(packet)
-        self.scheduler.push(packet, now=max(self.time, ctime))
 
         self._log_event(
             EventType.PACKET_GENERATED,
@@ -263,6 +270,11 @@ class NetworkSimulator:
             destination=destination,
             traffic_type=traffic_type,
         )
+
+        if self.shaper.enabled:
+            self.shaper.enqueue(packet, now=max(self.time, ctime), simulator=self)
+        else:
+            self.scheduler.push(packet, now=max(self.time, ctime))
 
         return packet
 
@@ -570,6 +582,16 @@ class NetworkSimulator:
             )
 
     def process_next_packet(self) -> Packet | None:
+        if self.shaper.enabled:
+            self.shaper.release_waiting(self.time, self)
+
+        if self.scheduler.empty() and self.shaper.enabled and self.shaper.has_waiting_packets():
+            next_release = self.shaper.next_release_time(self.time)
+            if next_release is not None:
+                self.time = max(self.time, next_release)
+                self.check_heartbeats()
+                self.shaper.release_waiting(self.time, self)
+
         if self.scheduler.empty():
             return None
 
@@ -822,7 +844,8 @@ class NetworkSimulator:
     def run(self, steps: int | None = None) -> List[Packet]:
         processed = []
 
-        limit = steps if steps is not None else len(self.scheduler)
+        total_waiting = len(self.scheduler) + (len(self.shaper.queue) if self.shaper.enabled else 0)
+        limit = steps if steps is not None else total_waiting
 
         for _ in range(limit):
             packet = self.process_next_packet()
@@ -843,9 +866,9 @@ class NetworkSimulator:
         return processed
 
     def run_until_empty(self) -> List[Packet]:
-        """Run until scheduler is empty."""
+        """Run until scheduler and traffic shaper are empty."""
         all_processed = []
-        while not self.scheduler.empty():
+        while not self.scheduler.empty() or (self.shaper.enabled and self.shaper.has_waiting_packets()):
             pkt = self.process_next_packet()
             if pkt is None:
                 break
@@ -856,6 +879,9 @@ class NetworkSimulator:
     def tick(self, delta: float = 1.0) -> None:
         """Advance simulation time by delta and check heartbeats."""
         self.time += delta
+        if self.shaper.enabled:
+            self.shaper.update_tokens(self.time)
+            self.shaper.release_waiting(self.time, self)
         self.transport.process_transport_tick(self.time)
         self.services.tick(delta)
         self.check_heartbeats()
@@ -1693,6 +1719,7 @@ class NetworkSimulator:
 
         # Re-create the scheduler with the configured QoS parameters.
         self.scheduler = create_scheduler(self.scheduler_name, **self.scheduler_params)
+        self.shaper.reset()
 
         self.last_heartbeat_check = 0.0
         self.baseline_metrics = None
@@ -1703,6 +1730,64 @@ class NetworkSimulator:
             EventType.SIMULATION_RESET,
             "Simulation reset",
         )
+
+    # ------------------------------------------------------------------
+    # Traffic Shaping (Token Bucket)
+    # ------------------------------------------------------------------
+    def configure_shaper(
+        self,
+        rate: Optional[float] = None,
+        capacity: Optional[float] = None,
+        max_queue_size: Optional[int] = None,
+        unit: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        initial_tokens: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Configure the traffic shaper."""
+        if enabled is False and self.shaper.enabled:
+            self.shaper.disable(self)
+        was_enabled = self.shaper.enabled
+        result = self.shaper.configure(
+            rate=rate,
+            capacity=capacity,
+            max_queue_size=max_queue_size,
+            unit=unit,
+            enabled=enabled,
+            initial_tokens=initial_tokens,
+        )
+        if enabled is True and not was_enabled:
+            self.shaper.enable(self)
+        self._log_event(
+            EventType.SHAPER_CONFIGURED,
+            f"Traffic shaper configured: rate={self.shaper.rate} {self.shaper.unit}/s, capacity={self.shaper.capacity} {self.shaper.unit}, queue_limit={self.shaper.max_queue_size}",
+            rate=self.shaper.rate,
+            capacity=self.shaper.capacity,
+            max_queue_size=self.shaper.max_queue_size,
+            unit=self.shaper.unit,
+            enabled=self.shaper.enabled,
+        )
+        return result
+
+    def enable_shaper(self) -> Dict[str, Any]:
+        self.shaper.enable(self)
+        return self.shaper.to_dict()
+
+    def disable_shaper(self) -> Dict[str, Any]:
+        self.shaper.disable(self)
+        return self.shaper.to_dict()
+
+    def reset_shaper(self) -> Dict[str, Any]:
+        self.shaper.reset()
+        self._log_event(
+            EventType.SHAPER_RESET,
+            "Traffic shaper reset to initial state",
+        )
+        return self.shaper.to_dict()
+
+    def get_shaper_state(self) -> Dict[str, Any]:
+        if self.shaper.enabled:
+            self.shaper.update_tokens(self.time)
+        return self.shaper.to_dict()
 
     # ------------------------------------------------------------------
     # Backward compatibility helpers

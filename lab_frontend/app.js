@@ -18,6 +18,7 @@ let isInitialLoad = true;
 let diagnosticView = false;
 let transportView = false;
 let servicesView = false;
+let shapingView = false;
 let studyView = null;   // 'learning' | 'challenges' | 'quiz' | 'demos' | 'overview'
 let transportProtocol = 'TCP';
 let packetFilter = { status: 'all', protocol: 'all', traffic_class: 'all' };
@@ -33,6 +34,7 @@ function closeInspector() {
   diagnosticView = false;
   transportView = false;
   servicesView = false;
+  shapingView = false;
   studyView = null;
   document.querySelector('.workspace')?.classList.add('inspector-collapsed');
   $('inspector')?.classList.add('collapsed');
@@ -153,7 +155,7 @@ class PacketAnimator {
     return points;
   }
 
-  computeHopDuration(fromId, toId) {
+  computeHopDuration(fromId, toId, totalHops = 1) {
     const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
     let latency = 0;
     if (state?.links && fromId && toId) {
@@ -163,15 +165,18 @@ class PacketAnimator {
       );
       if (l) latency = Number(l.latency || 0);
     }
-    // ~950 ms per hop at 1x speed, scaled up by link latency and divided by sim speed
-    const rawDuration = (950 + latency * 12) / simSpeed;
-    return Math.max(160, Math.round(rawDuration));
+    // Hop duration allows smooth movement where multiple packets can be in flight simultaneously
+    const baseHopDuration = 480 / simSpeed;
+    const latencyFactor = 1 + Math.min(1.5, latency / 40);
+    const rawDuration = baseHopDuration * latencyFactor;
+    return Math.max(120, Math.round(rawDuration));
   }
 
   computeHopDurations(coords) {
     const durations = [];
+    const totalHops = Math.max(1, coords.length - 1);
     for (let i = 0; i < coords.length - 1; i++) {
-      durations.push(this.computeHopDuration(coords[i].id, coords[i + 1].id));
+      durations.push(this.computeHopDuration(coords[i].id, coords[i + 1].id, totalHops));
     }
     return durations;
   }
@@ -356,8 +361,8 @@ class PacketAnimator {
       if (journey.finished) continue;
 
       for (let h = journey.currentHop; h < journey.coords.length - 1; h++) {
-        const oldDur = journey.hopDurations[h] || 950;
-        const newDur = this.computeHopDuration(journey.coords[h].id, journey.coords[h + 1].id);
+        const oldDur = journey.hopDurations[h] || 600;
+        const newDur = this.computeHopDuration(journey.coords[h].id, journey.coords[h + 1].id, journey.totalHops);
         journey.hopDurations[h] = newDur;
 
         if (h === journey.currentHop && oldDur > 0) {
@@ -720,7 +725,15 @@ function renderCanvas() {
   $('topologyName').textContent = state.name;
   $('clock').textContent = clock(state.time);
   $('statSent').textContent = Math.round(state.metrics.sent); $('statDelivered').textContent = Math.round(state.metrics.delivered); $('statDropped').textContent = Math.round(state.metrics.dropped); $('statPdr').textContent = `${fmt(state.metrics.pdr, 1)}%`; $('statLatency').textContent = `${fmt(state.metrics.latency, 1)} ms`; $('statRouteChanges').textContent = state.metrics.route_changes;
-  const q = state.queue || {}; $('queueLength').textContent = `${Math.round(q.length || 0)} packets`; $('queueWait').textContent = `${fmt((q.average_wait || 0) * 1000, 1)} ms average wait`; $('flowCount').textContent = `${state.flows?.length || 0} active flows`; const summary = $('simulationSummary'); if (summary) summary.textContent = state.metrics.sent ? `${state.running ? 'SIMULATION RUNNING' : 'SIMULATION COMPLETE'} · ${Math.round(state.metrics.sent)} sent · ${Math.round(state.metrics.delivered)} delivered · ${Math.round(state.metrics.dropped)} dropped · PDR ${fmt(state.metrics.pdr, 1)}% · ${fmt(state.metrics.latency, 1)} ms avg` : 'Idle · no packets sent'; $('queueBar').style.width = `${Math.min(100, (q.length || 0) * 10)}%`;
+  const q = state.queue || {};
+  const shp = state.shaping || {};
+  const shpQueueStr = shp.enabled && shp.current_queue_length ? ` (${shp.current_queue_length} shaping)` : '';
+  $('queueLength').textContent = `${Math.round(q.length || 0)} packets${shpQueueStr}`;
+  $('queueWait').textContent = `${fmt((q.average_wait || 0) * 1000, 1)} ms average wait`;
+  $('flowCount').textContent = `${state.flows?.length || 0} active flows`;
+  const summary = $('simulationSummary');
+  if (summary) summary.textContent = state.metrics.sent ? `${state.running ? 'SIMULATION RUNNING' : 'SIMULATION COMPLETE'} · ${Math.round(state.metrics.sent)} sent · ${Math.round(state.metrics.delivered)} delivered · ${Math.round(state.metrics.dropped)} dropped · PDR ${fmt(state.metrics.pdr, 1)}% · ${fmt(state.metrics.latency, 1)} ms avg` : 'Idle · no packets sent';
+  $('queueBar').style.width = `${Math.min(100, ((q.length || 0) + (shp.current_queue_length || 0)) * 10)}%`;
   const packets = state.packets || [];
   if (highlightedRoutePath && !routeStillCurrent(highlightedRoutePath)) {
     highlightedRoutePath = null;
@@ -730,10 +743,15 @@ function renderCanvas() {
     clearAllPacketVisuals(false);
   } else {
     const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
-    const staggerInterval = Math.max(140, Math.round(220 / simSpeed));
+    const staggerInterval = Math.max(80, Math.round(180 / simSpeed));
     let newBatchIndex = 0;
     packets.forEach(packet => {
       const packetKey = String(packet.id);
+      // Synchronize with live queue: packets waiting in queue (status PENDING) must
+      // not fly on the wire until dequeued and transmitted by the simulator.
+      if (packet.status === 'PENDING') {
+        return;
+      }
       if (!seenPacketIds.has(packetKey)) {
         seenPacketIds.add(packetKey);
         const delay = newBatchIndex * staggerInterval;
@@ -747,13 +765,16 @@ function renderCanvas() {
   renderDiagnosticToolbar();
   $('undoBtn').disabled = !state.can_undo; $('redoBtn').disabled = !state.can_redo;
   $('playBtn').classList.toggle('primary', state.running);
-  if ($('workspaceSpeed') && $('workspaceSpeed').value !== String(state.speed ?? 1)) {
-    $('workspaceSpeed').value = String(state.speed ?? 1);
+  const currentSpeed = Number(state.speed ?? 1);
+  if ($('workspaceSpeed') && $('workspaceSpeed').value !== String(currentSpeed)) {
+    $('workspaceSpeed').value = String(currentSpeed);
     packetAnimator.updateSpeed();
+    if (state?.running && playTimer) play();
   }
-  if ($('speedSelect') && $('speedSelect').value !== String(state.speed ?? 1)) {
-    $('speedSelect').value = String(state.speed ?? 1);
+  if ($('speedSelect') && $('speedSelect').value !== String(currentSpeed)) {
+    $('speedSelect').value = String(currentSpeed);
     packetAnimator.updateSpeed();
+    if (state?.running && playTimer) play();
   }
 }
 function renderTimeline() {
@@ -829,11 +850,17 @@ function bindPacketList() {
 function property(label, value, html = false) { return `<div class="property"><label>${esc(label)}</label>${html ? value : `<span>${esc(value)}</span>`}</div>`; }
 function deviceInspector(device) {
   const down = device.status === 'DOWN';
+  const curType = $('trafficType')?.value || 'Video';
+  const curDest = $('trafficDestination')?.value || '';
+  const curCount = $('trafficCount')?.value || '12';
+  const curPps = $('trafficPps')?.value || '5';
+  const curSize = $('trafficSize')?.value || '1500';
+  const curProto = $('trafficProtocol')?.value || 'IP';
   return `<div class="device-hero"><div class="device-symbol">${device.type === 'router' ? '◉' : device.type === 'switch' ? '▥' : '🖥'}</div><div><b>${esc(device.name)}</b><span>${esc(TYPES[device.type] || device.type)} · ${device.interfaces.length} interface${device.interfaces.length === 1 ? '' : 's'}</span></div></div>
   <div class="inspector-section"><div class="section-title">Identity <span class="status-badge ${down ? 'status-down' : 'status-up'}">${down ? 'DOWN' : 'ONLINE'}</span></div><input id="renameInput" value="${esc(device.name)}" style="width:100%;margin-bottom:8px"/><div class="button-row"><button data-action="rename">Rename</button><button data-action="duplicate">Duplicate</button><button class="danger" data-action="delete-device">Delete</button></div></div>
   <div class="inspector-section"><div class="section-title">Interfaces <span>${device.interfaces.length}</span></div>${device.interfaces.map(i => `<div class="interface-card"><div class="interface-head"><b>${esc(i.interface_id)}</b><span class="status-badge ${i.status === 'UP' ? 'status-up' : 'status-down'}">${i.status}</span></div><div class="interface-fields"><input data-field="ip_address" value="${esc(i.ip_address || '')}" placeholder="IP address"/><input data-field="prefix" type="number" min="1" max="32" value="${i.prefix}"/><input data-field="mac_address" value="${esc(i.mac_address || '')}" placeholder="MAC address"/><select data-field="status"><option ${i.status === 'UP' ? 'selected' : ''}>UP</option><option ${i.status === 'DOWN' ? 'selected' : ''}>DOWN</option></select></div><div class="interface-actions"><span>${esc(i.network_address || 'unassigned')}</span><button data-action="apply-interface" data-interface="${esc(i.interface_id)}">Apply</button></div></div>`).join('')}</div>
   <div class="inspector-section"><div class="section-title">Device actions</div><div class="button-row">${down ? '<button data-action="restart">Restart device</button>' : '<button class="danger" data-action="shutdown">Shutdown device</button>'}<button data-action="console">Open console</button></div></div>
-  <div class="inspector-section"><div class="section-title">Traffic generator</div><label>Protocol<select id="trafficProtocol"><option value="IP">IP traffic flow</option><option value="ICMP">ICMP Echo</option><option value="TCP">TCP data</option><option value="UDP">UDP datagrams</option></select></label><div class="traffic-form"><label>Destination<select id="trafficDestination">${state.devices.filter(d => d.id !== device.id && d.status === 'UP').map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}</select></label><div class="two"><label>Class<select id="trafficType"><option>Emergency</option><option>VoIP</option><option selected>Video</option><option>HTTP</option><option>FTP</option></select></label><label>Packets<input id="trafficCount" type="number" min="1" value="12"/></label></div><div class="two"><label>Rate (pps)<input id="trafficPps" type="number" min=".1" value="5"/></label><label>Size (B)<input id="trafficSize" type="number" min="64" value="1500"/></label></div><button data-action="start-traffic" data-source="${esc(device.id)}">Start traffic</button></div></div>
+  <div class="inspector-section"><div class="section-title">Traffic generator</div><label>Protocol<select id="trafficProtocol"><option value="IP" ${curProto === 'IP' ? 'selected' : ''}>IP traffic flow</option><option value="ICMP" ${curProto === 'ICMP' ? 'selected' : ''}>ICMP Echo</option><option value="TCP" ${curProto === 'TCP' ? 'selected' : ''}>TCP data</option><option value="UDP" ${curProto === 'UDP' ? 'selected' : ''}>UDP datagrams</option></select></label><div class="traffic-form"><label>Destination<select id="trafficDestination">${state.devices.filter(d => d.id !== device.id && d.status === 'UP').map(d => `<option value="${esc(d.id)}" ${d.id === curDest ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label><div class="two"><label>Class<select id="trafficType"><option ${curType === 'Emergency' ? 'selected' : ''}>Emergency</option><option ${curType === 'VoIP' ? 'selected' : ''}>VoIP</option><option ${curType === 'Video' ? 'selected' : ''}>Video</option><option ${curType === 'HTTP' ? 'selected' : ''}>HTTP</option><option ${curType === 'FTP' ? 'selected' : ''}>FTP</option></select></label><label>Packets<input id="trafficCount" type="number" min="1" value="${esc(curCount)}"/></label></div><div class="two"><label>Rate (pps)<input id="trafficPps" type="number" min=".1" value="${esc(curPps)}"/></label><label>Size (B)<input id="trafficSize" type="number" min="64" value="${esc(curSize)}"/></label></div><button data-action="start-traffic" data-source="${esc(device.id)}">Start traffic</button></div></div>
   ${device.type === 'router' ? routerTable(device) : device.type === 'switch' ? switchTable(device) : serverInfo(device)}`;
 }
 function routerTable(device) { const rows = (state.routing_tables && state.routing_tables[device.id]) || (state.routing_table_entries && state.routing_table_entries[device.id]) || []; return `<div class="inspector-section"><div class="section-title">Routing table <span>${rows.length} routes</span></div>${rows.length ? rows.map((r, idx) => `<div class="interface-card clickable" data-route-idx="${idx}"><b>${esc(r.destination_network)}/${r.prefix}</b><div>via ${esc(r.next_hop || (r.status === 'UNREACHABLE' ? 'unreachable' : 'DIRECT'))} · ${esc(r.outgoing_interface || '—')} · metric ${r.metric == null ? '—' : fmt(r.metric, 1)} · <span class="route-status ${r.status === 'REACHABLE' ? 'status-up' : 'status-down'}">${esc(r.status || 'REACHABLE')}</span></div><div class="route-path hint">Path: ${(r.route_path && r.route_path.length) ? esc(r.route_path.join(' → ')) : ((r.path && r.path.length) ? esc(r.path.join(' → ')) : '—')}</div></div>`).join('') : '<p class="hint">No route entries available.</p>'}</div><div class="inspector-section"><div class="section-title">Route details</div><div class="hint">Click a routing table entry above to highlight its path on the canvas.</div></div>`; }
@@ -852,8 +879,9 @@ function packetInspector(packet) {
   const dropReason = packet.drop_reason || packet.reason;
   const transport = packet.protocol === 'TCP' || packet.protocol === 'UDP';
   const queueWait = packet.queue_wait_ms ?? (packet.queue_wait_time == null ? null : packet.queue_wait_time * 1000);
+  const shapingWait = packet.shaping_delay_ms ?? (packet.shaping_delay == null ? null : packet.shaping_delay * 1000);
   const pktLatency = packet.latency == null ? null : (packet.latency < 1 ? packet.latency * 1000 : packet.latency);
-  return `<div class="device-hero"><div class="device-symbol" style="color:${COLORS[trafficClass] || '#56d9e8'}">●</div><div><b>Packet #${esc(packet.id)}</b><span>${esc(packet.status)} · ${esc(trafficClass)}</span></div></div><div class="inspector-section">${property('Source', packet.source)}${property('Destination', packet.destination)}${property('Protocol', packet.protocol || 'IP')}${property('Size', `${packet.size} bytes`)}${property('TTL', packet.ttl)}${property('Traffic class', trafficClass)}${transport ? property('Source port', packet.source_port) : ''}${transport ? property('Destination port', packet.destination_port) : ''}${transport ? property('Sequence number', packet.sequence_number ?? '—') : ''}${transport ? property('Acknowledgement number', packet.acknowledgement_number ?? '—') : ''}${transport ? property('Flags', (packet.flags || []).join(' ') || '—') : ''}${transport ? property('Window size', packet.window_size ?? '—') : ''}${transport ? property('Retransmission', packet.retransmission ?? 0) : ''}${property('Queue wait', queueWait == null ? '—' : `${fmt(queueWait, 2)} ms`)}${pktLatency != null ? property('Latency', `${fmt(pktLatency, 2)} ms`) : ''}${property('Current device', packet.current_device || '—')}${property('Next hop', packet.next_hop || '—')}${property('Status', packet.status)}${property('Flow ID', packet.flow_id || 'diagnostic')}${property('Route', (packet.route || []).join(' → ') || 'No route')}</div>${packet.service ? `<div class="inspector-section"><div class="section-title">SERVICE <span>${esc(packet.service.service || '')}</span></div>${property('Message', packet.service.message || '—')}${packet.service.request ? property('Request', packet.service.request) : ''}${packet.service.method ? property('Method', packet.service.method) : ''}${packet.service.path ? property('Path', packet.service.path) : ''}${packet.service.query ? property('Query', packet.service.query) : ''}${packet.service.response ? property('Response', packet.service.response) : ''}${packet.service.assigned_ip ? property('Assigned IP', packet.service.assigned_ip) : ''}${packet.service.offered_ip ? property('Offered IP', packet.service.offered_ip) : ''}${packet.service.filename ? property('File', packet.service.filename) : ''}${packet.service.bytes ? property('Bytes', packet.service.bytes) : ''}</div>` : ''}${packet.security ? `<div class="inspector-section"><div class="section-title">SECURITY <span>${esc(packet.security.decision || 'ALLOW')}</span></div>${property('Firewall', packet.security.firewall || '—')}${packet.security.firewall_rule ? property('Firewall rule', packet.security.firewall_rule) : ''}${property('ACL', packet.security.acl || '—')}${packet.security.acl_name ? property('ACL name', packet.security.acl_name) : ''}${property('ARP', packet.security.arp || 'NORMAL')}${property('Traffic', packet.security.traffic || 'NORMAL')}${property('Drop reason', packet.security.reason || '—')}</div>` : ''}${journeyData ? `<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${esc(journeyData.status)}</span></div><div class="diagnostic-path">${esc((journeyData.route || []).join(' ↓ '))}</div>${(journeyData.hops || []).map(hop => `<div class="journey-step"><b>${esc(hop.device)} · ${esc(hop.action)}</b><div>interface ${esc(hop.interface)} · queue ${hop.queue_length == null ? '—' : hop.queue_length} · ${hop.latency_ms == null ? '' : fmt(hop.latency_ms, 2) + ' ms'}</div><span class="hint">${esc((hop.events || []).join(', ') || hop.result)}</span></div>`).join('')}</div>` : ''}${explanation ? `<div class="inspector-section"><div class="section-title">WHY?</div>${explanation.failed ? `<div class="drop-reason">${esc(explanation.reason)}</div><p>${esc(explanation.explanation)}</p><div class="console-output">${esc(JSON.stringify(explanation.details, null, 1))}</div>` : '<p class="hint">This packet was not dropped.</p>'}</div>` : ''}${dropReason ? `<div class="drop-reason">DROP · ${esc(dropReason)}</div>` : ''}<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${journey.length} events</span></div>${journey.map((event, index) => `<div class="journey-step"><b>${index + 1}. ${esc(eventName(event.event))}</b><div>${esc(event.message)}</div><span class="hint">${clock(event.time)} · ${esc(event.component || 'simulator')}</span></div>`).join('') || '<p class="hint">No packet events recorded.</p>'}</div><button data-action="back-packets">Back to packet viewer</button>`;
+  return `<div class="device-hero"><div class="device-symbol" style="color:${COLORS[trafficClass] || '#56d9e8'}">●</div><div><b>Packet #${esc(packet.id)}</b><span>${esc(packet.status)} · ${esc(trafficClass)}</span></div></div><div class="inspector-section">${property('Source', packet.source)}${property('Destination', packet.destination)}${property('Protocol', packet.protocol || 'IP')}${property('Size', `${packet.size} bytes`)}${property('TTL', packet.ttl)}${property('Traffic class', trafficClass)}${transport ? property('Source port', packet.source_port) : ''}${transport ? property('Destination port', packet.destination_port) : ''}${transport ? property('Sequence number', packet.sequence_number ?? '—') : ''}${transport ? property('Acknowledgement number', packet.acknowledgement_number ?? '—') : ''}${transport ? property('Flags', (packet.flags || []).join(' ') || '—') : ''}${transport ? property('Window size', packet.window_size ?? '—') : ''}${transport ? property('Retransmission', packet.retransmission ?? 0) : ''}${shapingWait != null && shapingWait > 0 ? property('Shaping delay', `${fmt(shapingWait, 2)} ms`) : ''}${property('Queue wait', queueWait == null ? '—' : `${fmt(queueWait, 2)} ms`)}${pktLatency != null ? property('Latency', `${fmt(pktLatency, 2)} ms`) : ''}${property('Current device', packet.current_device || '—')}${property('Next hop', packet.next_hop || '—')}${property('Status', packet.status)}${property('Flow ID', packet.flow_id || 'diagnostic')}${property('Route', (packet.route || []).join(' → ') || 'No route')}</div>${packet.service ? `<div class="inspector-section"><div class="section-title">SERVICE <span>${esc(packet.service.service || '')}</span></div>${property('Message', packet.service.message || '—')}${packet.service.request ? property('Request', packet.service.request) : ''}${packet.service.method ? property('Method', packet.service.method) : ''}${packet.service.path ? property('Path', packet.service.path) : ''}${packet.service.query ? property('Query', packet.service.query) : ''}${packet.service.response ? property('Response', packet.service.response) : ''}${packet.service.assigned_ip ? property('Assigned IP', packet.service.assigned_ip) : ''}${packet.service.offered_ip ? property('Offered IP', packet.service.offered_ip) : ''}${packet.service.filename ? property('File', packet.service.filename) : ''}${packet.service.bytes ? property('Bytes', packet.service.bytes) : ''}</div>` : ''}${packet.security ? `<div class="inspector-section"><div class="section-title">SECURITY <span>${esc(packet.security.decision || 'ALLOW')}</span></div>${property('Firewall', packet.security.firewall || '—')}${packet.security.firewall_rule ? property('Firewall rule', packet.security.firewall_rule) : ''}${property('ACL', packet.security.acl || '—')}${packet.security.acl_name ? property('ACL name', packet.security.acl_name) : ''}${property('ARP', packet.security.arp || 'NORMAL')}${property('Traffic', packet.security.traffic || 'NORMAL')}${property('Drop reason', packet.security.reason || '—')}</div>` : ''}${journeyData ? `<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${esc(journeyData.status)}</span></div><div class="diagnostic-path">${esc((journeyData.route || []).join(' ↓ '))}</div>${(journeyData.hops || []).map(hop => `<div class="journey-step"><b>${esc(hop.device)} · ${esc(hop.action)}</b><div>interface ${esc(hop.interface)} · queue ${hop.queue_length == null ? '—' : hop.queue_length} · ${hop.latency_ms == null ? '' : fmt(hop.latency_ms, 2) + ' ms'}</div><span class="hint">${esc((hop.events || []).join(', ') || hop.result)}</span></div>`).join('')}</div>` : ''}${explanation ? `<div class="inspector-section"><div class="section-title">WHY?</div>${explanation.failed ? `<div class="drop-reason">${esc(explanation.reason)}</div><p>${esc(explanation.explanation)}</p><div class="console-output">${esc(JSON.stringify(explanation.details, null, 1))}</div>` : '<p class="hint">This packet was not dropped.</p>'}</div>` : ''}${dropReason ? `<div class="drop-reason">DROP · ${esc(dropReason)}</div>` : ''}<div class="inspector-section"><div class="section-title">PACKET JOURNEY <span>${journey.length} events</span></div>${journey.map((event, index) => `<div class="journey-step"><b>${index + 1}. ${esc(eventName(event.event))}</b><div>${esc(event.message)}</div><span class="hint">${clock(event.time)} · ${esc(event.component || 'simulator')}</span></div>`).join('') || '<p class="hint">No packet events recorded.</p>'}</div><button data-action="back-packets">Back to packet viewer</button>`;
 }
 function eventInspector(rawEvent) {
   // Structured events carry their payload under `details`; merge it with the
@@ -875,6 +903,13 @@ function eventInspector(rawEvent) {
     'TRAFFIC_STARTED': { icon: '▶', color: 'text-blue-600', label: 'Traffic Started' },
     'FLOW_COMPLETED': { icon: '✓', color: 'text-green-600', label: 'Flow Completed' },
     'FLOW_FAILED': { icon: '✗', color: 'text-red-600', label: 'Flow Failed' },
+    'SHAPER_ENABLED': { icon: '🟢', color: 'text-green-600', label: 'Shaping Enabled' },
+    'SHAPER_DISABLED': { icon: '⚪', color: 'text-ink-600', label: 'Shaping Disabled' },
+    'SHAPER_CONFIGURED': { icon: '⚙', color: 'text-blue-600', label: 'Shaper Configured' },
+    'SHAPER_PACKET_QUEUED': { icon: '⏳', color: 'text-orange-600', label: 'Packet Queued for Shaping' },
+    'SHAPER_PACKET_RELEASED': { icon: '✓', color: 'text-green-600', label: 'Packet Released by Shaper' },
+    'SHAPER_PACKET_DROPPED': { icon: '✗', color: 'text-red-600', label: 'Packet Dropped by Shaper' },
+    'SHAPER_RESET': { icon: '↻', color: 'text-ink-600', label: 'Shaper Reset' },
   };
   const info = eventTypes[event.event] || { icon: '•', color: 'text-ink-600', label: event.event };
   
@@ -1091,7 +1126,195 @@ function labSettings() {
   const routing = state.routing || {}, qos = state.qos || {}, weights = routing.weights || {}, classes = Object.keys(qos.priorities || {});
   const routingFields = Object.entries(weights).map(([name, value]) => `<label>${esc(name)}<input data-routing-weight="${esc(name)}" type="number" min="0" step="0.1" value="${value}"/></label>`).join('');
   const classFields = classes.map(name => `<div class="policy-row"><b>${esc(name)}</b><label>Priority<input data-priority="${esc(name)}" type="number" step="0.1" value="${qos.priorities[name]}"/></label><label>WFQ weight<input data-weight="${esc(name)}" type="number" min="0.1" step="0.1" value="${(qos.weights || {})[name] || 1}"/></label></div>`).join('');
-  return `<div class="device-hero"><div class="device-symbol">⚙</div><div><b>Lab policies</b><span>Live engine configuration</span></div></div><div class="inspector-section"><div class="section-title">Routing</div><label>Algorithm<select id="routingAlgorithm"><option value="dijkstra" ${routing.algorithm === 'dijkstra' ? 'selected' : ''}>Dijkstra</option><option value="bellman_ford" ${routing.algorithm === 'bellman_ford' ? 'selected' : ''}>Bellman–Ford</option></select></label><div class="policy-grid">${routingFields}</div><button data-action="apply-routing">Apply routing policy</button></div><div class="inspector-section"><div class="section-title">Quality of Service</div><label>Scheduler<select id="schedulerSelect"><option value="fifo" ${qos.scheduler === 'fifo' ? 'selected' : ''}>FIFO</option><option value="priority" ${qos.scheduler === 'priority' ? 'selected' : ''}>Priority Queue</option><option value="wfq" ${qos.scheduler === 'wfq' ? 'selected' : ''}>Weighted Fair Queuing</option></select></label><div class="policy-list">${classFields}</div><button data-action="apply-qos">Apply QoS policy</button></div><div class="inspector-section" style="padding-top:12px"><button id="closePoliciesBtn" style="width:100%">✕ Close Inspector</button></div>`;
+  const shp = state.shaping || {};
+  return `<div class="device-hero"><div class="device-symbol">⚙</div><div><b>Lab policies</b><span>Live engine configuration</span></div></div>
+  <div class="inspector-section"><div class="section-title">Traffic Shaping <span class="shaper-status-badge status-${(shp.status || 'DISABLED').toLowerCase()}">${shp.status || 'DISABLED'}</span></div><p class="hint">Token Bucket rate limiter: rate <b>${shp.rate || 5} ${shp.unit === 'bytes' ? 'bytes/s' : 'packets/s'}</b>, capacity <b>${shp.capacity || 10}</b>, tokens <b>${fmt(shp.tokens || 0, 1)}</b>, queue <b>${shp.current_queue_length || 0}</b>.</p><button data-action="open-shaper">Open Traffic Shaping panel</button></div>
+  <div class="inspector-section"><div class="section-title">Routing</div><label>Algorithm<select id="routingAlgorithm"><option value="dijkstra" ${routing.algorithm === 'dijkstra' ? 'selected' : ''}>Dijkstra</option><option value="bellman_ford" ${routing.algorithm === 'bellman_ford' ? 'selected' : ''}>Bellman–Ford</option></select></label><div class="policy-grid">${routingFields}</div><button data-action="apply-routing">Apply routing policy</button></div><div class="inspector-section"><div class="section-title">Quality of Service</div><label>Scheduler<select id="schedulerSelect"><option value="fifo" ${qos.scheduler === 'fifo' ? 'selected' : ''}>FIFO</option><option value="priority" ${qos.scheduler === 'priority' ? 'selected' : ''}>Priority Queue</option><option value="wfq" ${qos.scheduler === 'wfq' ? 'selected' : ''}>Weighted Fair Queuing</option></select></label><div class="policy-list">${classFields}</div><button data-action="apply-qos">Apply QoS policy</button></div><div class="inspector-section" style="padding-top:12px"><button id="closePoliciesBtn" style="width:100%">✕ Close Inspector</button></div>`;
+}
+
+function trafficShapingInspector() {
+  const s = state.shaping || {};
+  const enabled = !!s.enabled;
+  const rate = s.rate != null ? s.rate : 5.0;
+  const capacity = s.capacity != null ? s.capacity : 10.0;
+  const tokens = s.tokens != null ? s.tokens : capacity;
+  const maxQueue = s.max_queue_size != null ? s.max_queue_size : 50;
+  const currentQueue = s.current_queue_length || 0;
+  const unit = s.unit || 'packets';
+  const unitLabel = unit === 'bytes' ? 'bytes/s' : 'packets/s';
+  const capUnitLabel = unit === 'bytes' ? 'bytes' : 'packets';
+  const status = s.status || (enabled ? 'ACTIVE' : 'DISABLED');
+
+  const tokenPercent = capacity > 0 ? Math.min(100, Math.max(0, (tokens / capacity) * 100)) : 0;
+  const isDepleted = tokenPercent < 20;
+
+  const stats = [
+    ['Tokens', `${fmt(tokens, 2)} / ${fmt(capacity, 0)}`],
+    ['Queue', `${currentQueue} / ${maxQueue}`],
+    ['Admitted', s.packets_admitted || 0],
+    ['Released', s.packets_released || 0],
+    ['Delayed', s.packets_delayed || 0],
+    ['Queue Drops', s.packets_dropped || 0],
+    ['Avg Wait', `${fmt((s.average_shaping_delay || 0) * 1000, 2)} ms`],
+    ['Max Wait', `${fmt((s.max_shaping_delay || 0) * 1000, 2)} ms`]
+  ];
+
+  return `
+    <div class="device-hero">
+      <div class="device-symbol">⏳</div>
+      <div>
+        <b>Traffic Shaping</b>
+        <span>Token Bucket Algorithm · NetAdapt QoS</span>
+      </div>
+    </div>
+
+    <div class="inspector-section">
+      <div class="section-title">
+        Operational Status 
+        <span class="shaper-status-badge status-${status.toLowerCase()}">${esc(status)}</span>
+      </div>
+      <div class="shaper-bucket-visual">
+        <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600">
+          <span>Bucket Fill: ${fmt(tokens, 2)} ${capUnitLabel}</span>
+          <span>${fmt(tokenPercent, 1)}%</span>
+        </div>
+        <div class="bucket-bar-wrap">
+          <div class="bucket-bar-fill ${isDepleted ? 'depleted' : ''}" style="width:${tokenPercent}%"></div>
+        </div>
+        <div class="hint" style="font-size:10px">
+          ${enabled ? (currentQueue > 0 ? `Regulating flow: ${currentQueue} packet(s) waiting for tokens.` : 'Ready for traffic bursts up to capacity.') : 'Shaping disabled: traffic passes directly to QoS scheduler.'}
+        </div>
+      </div>
+      <div class="button-row">
+        <button id="toggleShaperBtn" class="${enabled ? 'danger' : 'primary'}">
+          ${enabled ? 'Disable Shaping' : 'Enable Shaping'}
+        </button>
+        <button id="resetShaperBtn">Reset Shaper</button>
+      </div>
+    </div>
+
+    <div class="inspector-section">
+      <div class="section-title">Token Bucket Configuration</div>
+      <div class="shaper-input-group">
+        <label style="flex:1">
+          Token Generation Rate
+          <input id="shaperRate" type="number" min="0.1" step="0.5" value="${rate}"/>
+        </label>
+        <span class="shaper-input-unit">${unitLabel}</span>
+      </div>
+
+      <div class="shaper-input-group">
+        <label style="flex:1">
+          Burst Capacity
+          <input id="shaperCapacity" type="number" min="1" step="1" value="${capacity}"/>
+        </label>
+        <span class="shaper-input-unit">${capUnitLabel}</span>
+      </div>
+
+      <div class="shaper-input-group">
+        <label style="flex:1">
+          Max Queue Limit
+          <input id="shaperMaxQueue" type="number" min="0" step="5" value="${maxQueue}"/>
+        </label>
+        <span class="shaper-input-unit">packets</span>
+      </div>
+
+      <label>
+        Metering Unit
+        <select id="shaperUnit">
+          <option value="packets" ${unit === 'packets' ? 'selected' : ''}>Packets (1 token = 1 packet)</option>
+          <option value="bytes" ${unit === 'bytes' ? 'selected' : ''}>Bytes (1 token = 1 byte)</option>
+        </select>
+      </label>
+
+      <div class="button-row" style="margin-top:8px">
+        <button id="applyShaperBtn" class="primary">Apply Configuration</button>
+      </div>
+    </div>
+
+    <div class="inspector-section">
+      <div class="section-title">Shaping Metrics</div>
+      <div class="diagnostic-stats">
+        ${stats.map(([l, v]) => `<div class="diagnostic-stat"><b>${esc(v)}</b><span>${l}</span></div>`).join('')}
+      </div>
+    </div>
+
+    <div class="inspector-section">
+      <div class="section-title">How Token Bucket Works</div>
+      <div class="hint" style="line-height:1.5">
+        <b>1. Accumulation:</b> Tokens fill bucket at <i>${rate} ${unitLabel}</i> up to <i>${capacity} ${capUnitLabel}</i>.<br>
+        <b>2. Bursting:</b> Bursts up to bucket capacity transmit immediately without delay.<br>
+        <b>3. Shaping:</b> Packets exceeding available tokens wait in the queue until new tokens arrive.<br>
+        <b>4. Queue Limit:</b> If queue exceeds limit, excess packets are dropped.
+      </div>
+    </div>
+  `;
+}
+
+function bindTrafficShaping() {
+  $('toggleShaperBtn')?.addEventListener('click', async () => {
+    try {
+      await api('shaping_toggle', { enabled: !state.shaping?.enabled });
+      shapingView = true;
+      renderInspector();
+      toast(state.shaping?.enabled ? 'Traffic shaping enabled' : 'Traffic shaping disabled');
+    } catch (e) {
+      toast(e.message || 'Failed to toggle shaper', true);
+    }
+  });
+
+  $('resetShaperBtn')?.addEventListener('click', async () => {
+    try {
+      await api('shaping_reset', {});
+      shapingView = true;
+      renderInspector();
+      toast('Traffic shaper reset');
+    } catch (e) {
+      toast(e.message || 'Failed to reset shaper', true);
+    }
+  });
+
+  $('applyShaperBtn')?.addEventListener('click', async () => {
+    const rateVal = parseFloat($('shaperRate')?.value);
+    const capVal = parseFloat($('shaperCapacity')?.value);
+    const queueVal = parseInt($('shaperMaxQueue')?.value, 10);
+    const unitVal = $('shaperUnit')?.value || 'packets';
+
+    if (isNaN(rateVal) || !isFinite(rateVal) || rateVal <= 0) {
+      toast('Invalid rate: must be a positive finite number', true);
+      return;
+    }
+    if (rateVal > 1000000) {
+      toast('Rate too large (max: 1,000,000)', true);
+      return;
+    }
+    if (isNaN(capVal) || !isFinite(capVal) || capVal <= 0) {
+      toast('Invalid capacity: must be a positive finite number', true);
+      return;
+    }
+    if (capVal > 1000000) {
+      toast('Capacity too large (max: 1,000,000)', true);
+      return;
+    }
+    if (isNaN(queueVal) || queueVal < 0 || queueVal > 100000) {
+      toast('Invalid queue limit: must be between 0 and 100,000', true);
+      return;
+    }
+
+    try {
+      await api('shaping_configure', {
+        rate: rateVal,
+        capacity: capVal,
+        max_queue_size: queueVal,
+        unit: unitVal
+      });
+      shapingView = true;
+      renderInspector();
+      toast('Traffic shaper configuration applied');
+    } catch (e) {
+      toast(e.message || 'Failed to configure traffic shaper', true);
+    }
+  });
 }
 function learningInspector() {
   const learning = state.learning || {}, categories = learning.categories || [], result = learning.result, mode = learning.step_mode || {};
@@ -1165,25 +1388,29 @@ function bindStudyPanels() {
   }));
 }
 function renderInspector() {
+  if (document.activeElement && inspectorBody.contains(document.activeElement) && ['SELECT', 'INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    return;
+  }
   let html = labSettings();
   let title = 'Lab policies';
-  if (servicesView) { html = servicesLabInspector(); title = 'Services & Security'; }
+  if (shapingView) { html = trafficShapingInspector(); title = 'Traffic Shaping'; }
+  else if (servicesView) { html = servicesLabInspector(); title = 'Services & Security'; }
   else if (studyView) { html = studyView === 'learning' ? learningInspector() : studyView === 'challenges' ? challengesInspector() : studyView === 'quiz' ? quizInspector() : studyView === 'demos' ? demosInspector() : overviewInspector(); title = studyView.toUpperCase(); }
   else if (transportView) { html = transportLabInspector(); title = 'Transport Lab'; }
   else if (diagnosticView) { html = state.packetListView ? packetListInspector() : diagnosticResultInspector(); title = state.packetListView ? 'Packet Inspector' : 'Diagnostics'; }
-  if (!transportView && !studyView && !diagnosticView && selected?.kind === 'device') {
+  if (!shapingView && !transportView && !studyView && !diagnosticView && selected?.kind === 'device') {
     const d = state.devices.find(x => x.id === selected.id);
     if (d) { html = deviceInspector(d); title = d.name; }
   }
-  if (!transportView && !studyView && !diagnosticView && selected?.kind === 'link') {
+  if (!shapingView && !transportView && !studyView && !diagnosticView && selected?.kind === 'link') {
     const l = state.links.find(x => key(x.source, x.target) === key(selected.id, selected.other));
     if (l) { html = linkInspector(l); title = `${selected.id} ↔ ${selected.other}`; }
   }
-  if (!transportView && !studyView && !diagnosticView && selected?.kind === 'packet') {
+  if (!shapingView && !transportView && !studyView && !diagnosticView && selected?.kind === 'packet') {
     html = packetInspector(selected.data);
     title = `Packet #${selected.data?.id}`;
   }
-  if (!transportView && !studyView && !diagnosticView && selected?.kind === 'event') {
+  if (!shapingView && !transportView && !studyView && !diagnosticView && selected?.kind === 'event') {
     html = eventInspector(selected.data);
     title = `Event: ${selected.data?.event}`;
   }
@@ -1193,6 +1420,7 @@ function renderInspector() {
   bindInspectorActions();
   bindTransportLab();
   bindServicesLab();
+  bindTrafficShaping();
   bindStudyPanels();
   $('closePoliciesBtn')?.addEventListener('click', closeInspector);
   if (diagnosticView && state.packetListView) bindPacketList();
@@ -1228,6 +1456,7 @@ function bindInspectorActions() {
       }
       if (action === 'apply-routing') { const routingWeights = {}; inspectorBody.querySelectorAll('[data-routing-weight]').forEach(input => routingWeights[input.dataset.routingWeight] = Number(input.value)); await api('routing_algorithm', { algorithm: $('routingAlgorithm').value }); await api('routing_weights', { weights: routingWeights }); toast('Routing policy applied'); }
       if (action === 'apply-qos') { const priorities = {}, weights = {}; inspectorBody.querySelectorAll('[data-priority]').forEach(input => priorities[input.dataset.priority] = Number(input.value)); inspectorBody.querySelectorAll('[data-weight]').forEach(input => weights[input.dataset.weight] = Number(input.value)); await api('scheduler', { scheduler: $('schedulerSelect').value }); await api('qos_config', { priorities, weights }); toast('QoS policy applied'); }
+      if (action === 'open-shaper') { shapingView = true; selected = null; renderInspector(); }
       if (action === 'clear-arp') await api('clear_arp', { id: state.diagnostic_result.device });
       if (action === 'clear-mac') await api('clear_mac', { id: state.diagnostic_result.device });
       if (action === 'open-packets' || action === 'back-packets') { state.packetListView = true; diagnosticView = true; renderInspector(); }
@@ -1340,10 +1569,11 @@ document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click'
 document.querySelectorAll('[data-menu]').forEach(button => button.addEventListener('click', () => { const action = button.dataset.menu; if (action === 'file') { $('newBtn').click(); } else if (action === 'simulation') { $('playBtn').click(); } else if (action === 'view') { $('fitBtn').click(); $('gridToggle').checked = !$('gridToggle').checked; renderCanvas(); } else { toast('Build a topology, connect devices, start traffic, then inject faults to observe self-healing.'); } }));
 document.querySelectorAll('[data-diagnostic]').forEach(button => button.addEventListener('click', async () => {
   const action = button.dataset.diagnostic;
-  if (action === 'transport') { transportView = true; servicesView = false; diagnosticView = false; openInspector(); return; }
-  if (action === 'services') { servicesView = true; studyView = null; transportView = false; diagnosticView = false; openInspector(); return; }
-  if (['learning', 'challenges', 'quiz', 'demos', 'overview'].includes(action)) { studyView = action; servicesView = false; transportView = false; diagnosticView = false; openInspector(); return; }
-  if (action === 'packets') { state.packetListView = true; diagnosticView = true; transportView = false; openInspector(); return; }
+  if (action === 'shaping') { shapingView = true; transportView = false; servicesView = false; diagnosticView = false; studyView = null; selected = null; openInspector(); return; }
+  if (action === 'transport') { transportView = true; shapingView = false; servicesView = false; diagnosticView = false; openInspector(); return; }
+  if (action === 'services') { servicesView = true; shapingView = false; studyView = null; transportView = false; diagnosticView = false; openInspector(); return; }
+  if (['learning', 'challenges', 'quiz', 'demos', 'overview'].includes(action)) { studyView = action; shapingView = false; servicesView = false; transportView = false; diagnosticView = false; openInspector(); return; }
+  if (action === 'packets') { state.packetListView = true; shapingView = false; diagnosticView = true; transportView = false; openInspector(); return; }
   const source = selected?.kind === 'device' ? selected.id : null;
   if (!source) { toast('Select a source device first.', true); return; }
   const destination = $('diagnosticDestination').value;
@@ -1358,12 +1588,12 @@ document.querySelectorAll('[data-diagnostic]').forEach(button => button.addEvent
     } else {
       await api(action === 'arp' ? 'arp_table' : 'mac_table', { id: source });
     }
-    state.packetListView = false; diagnosticView = true; transportView = false; openInspector();
+    state.packetListView = false; diagnosticView = true; transportView = false; shapingView = false; openInspector();
   } catch (error) { toast(error.message, true); }
 }));
 document.querySelectorAll('.palette-item').forEach(item => item.addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', item.dataset.type)));
 canvas.addEventListener('dragover', e => e.preventDefault()); canvas.addEventListener('drop', e => { e.preventDefault(); const type = e.dataTransfer.getData('text/plain'); if (type) { const p = canvasPoint(e); api('add_device', { type, x: p.x, y: p.y }); } });
-canvas.addEventListener('click', e => { if (e.target === canvas || e.target.id === 'gridRect' || e.target.id === 'connectPreview') { selected = null; diagnosticView = false; transportView = false; connectStart = null; connectPreview.setAttribute('d', ''); renderInspector(); } });
+canvas.addEventListener('click', e => { if (e.target === canvas || e.target.id === 'gridRect' || e.target.id === 'connectPreview') { selected = null; diagnosticView = false; transportView = false; shapingView = false; connectStart = null; connectPreview.setAttribute('d', ''); renderInspector(); } });
 canvas.addEventListener('pointermove', e => { if (connectStart && state) { const from = state.devices.find(d => d.id === connectStart), p = canvasPoint(e); if (from) connectPreview.setAttribute('d', `M ${from.x} ${from.y} L ${p.x} ${p.y}`); } });
 canvas.addEventListener('wheel', e => { e.preventDefault(); zoom = Math.max(.65, Math.min(1.5, zoom + (e.deltaY < 0 ? .05 : -.05))); canvas.style.transform = `scale(${zoom})`; }, { passive: false });
 $('gridToggle').addEventListener('change', renderCanvas); $('snapToggle').addEventListener('change', () => { });
@@ -1374,10 +1604,96 @@ $('presetSelect').addEventListener('change', e => { clearAllPacketVisuals(); api
 $('saveBtn').addEventListener('click', async () => { const data = await api('export'); const blob = new Blob([JSON.stringify(data.state.document, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'netadapt-lab.json'; a.click(); URL.revokeObjectURL(a.href); toast('Topology saved'); });
 $('openBtn').addEventListener('click', () => $('fileInput').click()); $('fileInput').addEventListener('change', async e => { const file = e.target.files[0]; if (file) { clearAllPacketVisuals(); api('import', { document: JSON.parse(await file.text()) }); } e.target.value = ''; });
 $('undoBtn').addEventListener('click', () => api('undo')); $('redoBtn').addEventListener('click', () => api('redo'));
-$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); if ($('workspaceSpeed')) $('workspaceSpeed').value = e.target.value; packetAnimator.updateSpeed(); });
+function updateSimulationSpeed(val) {
+  const num = Math.max(0.25, Math.min(10, Number(val)));
+  api('speed', { value: num });
+  if ($('speedSelect')) $('speedSelect').value = String(num);
+  if ($('workspaceSpeed')) $('workspaceSpeed').value = String(num);
+  if (state) state.speed = num;
+  packetAnimator.updateSpeed();
+  if (state?.running && playTimer) play();
+}
+$('playBtn').addEventListener('click', async () => { await api('running', { value: true }); play(); }); $('pauseBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stopBtn').addEventListener('click', () => { stop(); api('running', { value: false }); }); $('stepBtn').addEventListener('click', () => api('step')); $('resetBtn').addEventListener('click', () => { stop(); clearAllPacketVisuals(); api('reset'); }); $('speedSelect').addEventListener('change', e => updateSimulationSpeed(e.target.value));
 document.querySelectorAll('[data-workspace-control]').forEach(button => button.addEventListener('click', async () => { const control = button.dataset.workspaceControl; if (control === 'play') { await api('running', { value: true }); play(); } else if (control === 'step') { stop(); await api('step'); } else { stop(); await api('running', { value: false }); if (control === 'reset') { clearAllPacketVisuals(); await api('reset'); } } }));
-$('workspaceSpeed')?.addEventListener('change', e => { api('speed', { value: Number(e.target.value) }); $('speedSelect').value = e.target.value; packetAnimator.updateSpeed(); });
+$('workspaceSpeed')?.addEventListener('change', e => updateSimulationSpeed(e.target.value));
 $('fitBtn').addEventListener('click', () => { if (!state.devices.length) return; const xs = state.devices.map(d => d.x), ys = state.devices.map(d => d.y), minX = Math.min(...xs) - 100, maxX = Math.max(...xs) + 100, minY = Math.min(...ys) - 100, maxY = Math.max(...ys) + 100; canvas.setAttribute('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`); });
-async function play() { stop(); playTimer = setInterval(async () => { if (!state?.running) { stop(); return; } try { await api('step'); } catch (e) { stop(); } }, Math.max(120, 600 / (state?.speed || 1))); } function stop() { if (playTimer) clearInterval(playTimer); playTimer = null; }
+function getLiveQueueInterval() {
+  const simSpeed = Math.max(0.25, Math.min(10, Number(state?.speed || 1)));
+  const qLen = (state?.queue?.length || 0) + (state?.shaping?.current_queue_length || 0);
+
+  // Derive packet rate from active flow or traffic panel
+  let pps = null;
+  if (state?.flows && state.flows.length) {
+    const activeFlow = state.flows.slice().reverse().find(f => f.status === 'ACTIVE' || f.status === 'REROUTED') || state.flows[state.flows.length - 1];
+    if (activeFlow && activeFlow.pps && Number(activeFlow.pps) > 0) {
+      pps = Number(activeFlow.pps);
+    }
+  }
+  if (!pps && $('trafficPps') && Number($('trafficPps').value) > 0) {
+    pps = Number($('trafficPps').value);
+  }
+
+  // Base interval derived from packet rate (e.g. 10 PPS -> 100ms, 5 PPS -> 200ms)
+  let baseInterval;
+  if (pps && pps > 0) {
+    baseInterval = Math.max(60, Math.min(450, Math.round(1000 / pps)));
+  } else if (qLen > 10) {
+    baseInterval = 120;
+  } else if (qLen > 4) {
+    baseInterval = 160;
+  } else if (qLen > 1) {
+    baseInterval = 220;
+  } else {
+    baseInterval = 320;
+  }
+
+  // If traffic shaper is enabled and waiting for tokens, adapt interval to token rate
+  if (state?.shaping?.enabled && (state?.shaping?.current_queue_length || 0) > 0 && Number(state?.shaping?.tokens || 0) < 1) {
+    const shpRate = Number(state.shaping.rate || 5);
+    if (shpRate > 0) {
+      baseInterval = Math.max(baseInterval, Math.round(1000 / shpRate));
+    }
+  }
+
+  return Math.max(35, Math.round(baseInterval / simSpeed));
+}
+
+async function scheduleNextStep() {
+  if (!state?.running) {
+    stop();
+    return;
+  }
+  const interval = getLiveQueueInterval();
+  playTimer = setTimeout(async () => {
+    if (!state?.running) {
+      stop();
+      return;
+    }
+    try {
+      await api('step');
+    } catch (e) {
+      stop();
+      return;
+    }
+    if (state?.running) {
+      scheduleNextStep();
+    } else {
+      stop();
+    }
+  }, interval);
+}
+
+async function play() {
+  stop();
+  scheduleNextStep();
+}
+
+function stop() {
+  if (playTimer) {
+    clearTimeout(playTimer);
+    clearInterval(playTimer);
+    playTimer = null;
+  }
+}
 document.addEventListener('keydown', e => { if ((e.key === 'Delete' || e.key === 'Backspace') && selected?.kind === 'device' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); api('delete_device', { id: selected.id }); } if (e.key === 'Escape') { closeInspector(); } });
 loadState().catch(e => toast(e.message, true));

@@ -144,6 +144,19 @@ class LabHandler(BaseHTTPRequestHandler):
                 result = SESSION.set_qos_config(
                     payload.get("priorities"), payload.get("weights")
                 )
+            elif action == "shaping_configure":
+                result = SESSION.configure_shaping(
+                    rate=payload.get("rate"),
+                    capacity=payload.get("capacity"),
+                    max_queue_size=payload.get("max_queue_size"),
+                    unit=payload.get("unit"),
+                    enabled=payload.get("enabled"),
+                    initial_tokens=payload.get("initial_tokens"),
+                )
+            elif action == "shaping_toggle":
+                result = SESSION.toggle_shaping(payload.get("enabled"))
+            elif action == "shaping_reset":
+                result = SESSION.reset_shaping()
             elif action == "routing_algorithm":
                 result = SESSION.set_routing_algorithm(str(payload["algorithm"]))
             elif action == "routing_weights":

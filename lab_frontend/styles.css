@@ -1466,6 +1466,84 @@ select:hover, input:hover {
   border-color: var(--red);
 }
 
+/* Traffic Shaping Styles */
+.shaper-bucket-visual {
+  background: #F8FAFC;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.bucket-bar-wrap {
+  height: 10px;
+  background: #E2E8F0;
+  border-radius: 5px;
+  overflow: hidden;
+  margin: 8px 0 4px 0;
+  position: relative;
+}
+
+.bucket-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10B981, #059669);
+  border-radius: 5px;
+  transition: width 0.3s ease;
+}
+
+.bucket-bar-fill.depleted {
+  background: linear-gradient(90deg, #F59E0B, #EF4444);
+}
+
+.shaper-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.shaper-input-group input {
+  flex: 1;
+}
+
+.shaper-input-unit {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 65px;
+}
+
+.shaper-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.shaper-status-badge.status-idle {
+  background: #E0F2FE;
+  color: #0369A1;
+}
+
+.shaper-status-badge.status-active {
+  background: #DCFCE7;
+  color: #15803D;
+}
+
+.shaper-status-badge.status-shaping {
+  background: #FEF3C7;
+  color: #B45309;
+}
+
+.shaper-status-badge.status-disabled {
+  background: #F1F5F9;
+  color: #64748B;
+}
+
 /* Responsive adjustments */
 @media (max-width: 1180px) {
   .workspace {

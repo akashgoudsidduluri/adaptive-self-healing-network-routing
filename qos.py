@@ -138,6 +138,10 @@ class Packet:
     loss_roll: float | None = None
     #: IPv4 TTL used by the Stage 7 forwarding/ICMP model.
     ttl: int = 64
+    #: Delay (seconds) spent waiting in the traffic shaper before entering scheduler.
+    shaping_delay: float = 0.0
+    #: Simulation time at which packet entered the traffic shaper.
+    shaper_enqueued_time: float | None = None
 
     def __post_init__(self) -> None:
         if self.traffic_type not in PRIORITIES:
