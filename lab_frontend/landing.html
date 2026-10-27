@@ -41,6 +41,7 @@
         <a href="#healing" class="nav-link">Self-Healing</a>
         <a href="#qos" class="nav-link">QoS & Queuing</a>
         <a href="#how-it-works" class="nav-link">How It Works</a>
+        <a href="#playbook" class="nav-link" style="color: var(--forest); font-weight: 700;">Rulebook & Testing</a>
       </nav>
 
       <div class="header-actions">
@@ -512,7 +513,555 @@
     </div>
   </section>
 
-  <!-- Final Call to Action -->
+  <!-- Interactive Network Rulebook & How-To-Use Guide -->
+  <section class="playbook-section" id="playbook">
+    <div class="max-w-content">
+      <div class="section-header text-center">
+        <div class="eyebrow">
+          <span class="eyebrow-dot"></span>
+          <span>STEP-BY-STEP LAB PLAYBOOK</span>
+        </div>
+        <h2 class="section-title">How to experiment with NetAdapt.</h2>
+        <p class="section-desc">
+          Interactive test cases, architectural schematics, and verification procedures for every core network subsystem.
+        </p>
+
+        <!-- Interactive Tab Navigation -->
+        <div class="playbook-nav">
+          <button class="playbook-tab-btn active" data-tab="tab-self-healing">
+            <span>🛡️ Self-Healing & Reroute</span>
+            <span class="tab-badge">3 Cases</span>
+          </button>
+          <button class="playbook-tab-btn" data-tab="tab-qos">
+            <span>⚡ QoS & Priority Queuing</span>
+            <span class="tab-badge">3 Schedulers</span>
+          </button>
+          <button class="playbook-tab-btn" data-tab="tab-shaper">
+            <span>🚦 Traffic Shaping</span>
+            <span class="tab-badge">Token Bucket</span>
+          </button>
+          <button class="playbook-tab-btn" data-tab="tab-diagnostics">
+            <span>🔍 MAC & ARP Discovery</span>
+            <span class="tab-badge">L2 / L3</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Tab 1: Self-Healing & Fault Recovery -->
+      <div class="playbook-pane active" id="tab-self-healing">
+        <div class="playbook-grid">
+          <!-- Left: Visual Topology Diagram -->
+          <div class="playbook-diagram-card">
+            <div class="diagram-header">
+              <span class="diagram-title">TOPOLOGY SCHEMATIC · SELF-HEALING ARCHITECTURE</span>
+              <span class="status-pill status-live">ACTIVE PATH</span>
+            </div>
+            <div class="diagram-svg-container">
+              <svg viewBox="0 0 540 260" width="100%" height="260" style="overflow: visible;">
+                <!-- Link Lines -->
+                <!-- PC1 to SW1 -->
+                <line x1="60" y1="130" x2="130" y2="130" stroke="#045137" stroke-width="2.5" />
+                <!-- SW1 to R1 -->
+                <line x1="130" y1="130" x2="210" y2="130" stroke="#045137" stroke-width="2.5" />
+                
+                <!-- Primary Path: R1 to R2 (Active / Cut link) -->
+                <line x1="210" y1="130" x2="330" y2="70" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="6,4" />
+                <!-- R2 to SW2 -->
+                <line x1="330" y1="70" x2="410" y2="130" stroke="#94a3b8" stroke-width="2" />
+
+                <!-- Alternate Bypass Path: R1 to R3 -->
+                <line x1="210" y1="130" x2="330" y2="190" stroke="#16a34a" stroke-width="2.5" />
+                <!-- R3 to SW2 -->
+                <line x1="330" y1="190" x2="410" y2="130" stroke="#16a34a" stroke-width="2.5" />
+
+                <!-- SW2 to PC2 -->
+                <line x1="410" y1="130" x2="480" y2="130" stroke="#045137" stroke-width="2.5" />
+
+                <!-- Severance Indicator Marker on Primary Cable -->
+                <circle cx="270" cy="100" r="14" fill="#fee2e2" stroke="#ef4444" stroke-width="1.5" />
+                <text x="270" y="105" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700" fill="#dc2626">✕</text>
+                <text x="270" y="80" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#dc2626">CABLE CUT</text>
+
+                <!-- Dynamic Reroute Indicator -->
+                <path d="M 230,150 Q 270,220 310,205" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-dasharray="4,3" />
+                <polygon points="314,204 306,198 308,208" fill="#16a34a" />
+                <text x="270" y="240" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#16a34a">AUTONOMOUS FAILOVER VIA R3</text>
+
+                <!-- Device Nodes -->
+                <!-- PC1 -->
+                <g transform="translate(60, 130)">
+                  <circle r="18" fill="#f8fafc" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="11">💻</text>
+                  <text y="28" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#0f172a">PC1</text>
+                </g>
+
+                <!-- SW1 -->
+                <g transform="translate(130, 130)">
+                  <circle r="18" fill="#f8fafc" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="11">🔀</text>
+                  <text y="28" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#0f172a">SW1</text>
+                </g>
+
+                <!-- R1 -->
+                <g transform="translate(210, 130)">
+                  <circle r="20" fill="#045137" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="12" fill="#ffffff">⚙️</text>
+                  <text y="30" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#045137">R1</text>
+                </g>
+
+                <!-- R2 (Primary path node) -->
+                <g transform="translate(330, 70)">
+                  <circle r="18" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="11">⚠️</text>
+                  <text y="28" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#dc2626">R2 (Isolated)</text>
+                </g>
+
+                <!-- R3 (Bypass node) -->
+                <g transform="translate(330, 190)">
+                  <circle r="20" fill="#16a34a" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="12" fill="#ffffff">✓</text>
+                  <text y="30" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#16a34a">R3 (Bypass)</text>
+                </g>
+
+                <!-- SW2 -->
+                <g transform="translate(410, 130)">
+                  <circle r="18" fill="#f8fafc" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="11">🔀</text>
+                  <text y="28" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#0f172a">SW2</text>
+                </g>
+
+                <!-- PC2 -->
+                <g transform="translate(480, 130)">
+                  <circle r="18" fill="#f8fafc" stroke="#0f172a" stroke-width="1.5" />
+                  <text y="4" text-anchor="middle" font-size="11">🖥️</text>
+                  <text y="28" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#0f172a">PC2</text>
+                </g>
+              </svg>
+            </div>
+            <div class="diagram-legend">
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#045137;"></span> Active Path</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#dc2626;"></span> Severed Link (Cut)</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#16a34a;"></span> Autonomous Bypass Route</div>
+            </div>
+          </div>
+
+          <!-- Right: Step-by-Step Instructions -->
+          <div class="playbook-guide-card">
+            <span class="guide-case-badge">TEST SCENARIO 01 · LINK FAILURE & RECOVERY</span>
+            <h3 class="guide-heading">How to test Self-Healing in the Lab.</h3>
+            <p class="guide-intro">
+              Follow these exact steps in the interactive workspace to witness real-time link failure detection, autonomous Dijkstra SPF recalculation, and traffic failover with zero packet loss.
+            </p>
+
+            <div class="guide-steps-list">
+              <div class="guide-step-item">
+                <div class="step-badge-num">1</div>
+                <div class="step-text-wrap">
+                  <strong>Load Topology & Launch Traffic</strong>
+                  <p>In the top menu, choose Preset <code>Self-Healing Demo</code>. Click <strong>PC1</strong>, set Destination to <strong>PC2</strong>, Packets to <strong>20</strong>, Rate to <strong>5 pps</strong>, and click <strong>Start traffic</strong>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">2</div>
+                <div class="step-text-wrap">
+                  <strong>Sever Active Cable Link (Inject Fault)</strong>
+                  <p>While packets are actively streaming across <code>R1 → R2</code>, click directly on the physical cable between <strong>R1</strong> and <strong>R2</strong>. In the right Inspector panel, click the red <strong>Fail link</strong> button.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">3</div>
+                <div class="step-text-wrap">
+                  <strong>Observe Real-Time Autonomous Rerouting</strong>
+                  <p>The cable turns dashed red. The simulator detects the break, emits <code>LINK_FAILED</code>, and instantaneously shifts subsequent packets via <strong>R3</strong>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">4</div>
+                <div class="step-text-wrap">
+                  <strong>Heal the Link & Observe Route Recovery</strong>
+                  <p>Click the severed link cable again and click <strong>Recover link</strong>. Adjacency heartbeats re-establish, and the flow automatically migrates back to the primary low-cost path.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="observation-box">
+              <div class="observation-header">
+                <span>VERIFICATION CHECKLIST</span>
+              </div>
+              <ul class="observation-list">
+                <li><span class="check">✓</span> <strong>Timeline Event:</strong> Emits <code>LINK_FAILED</code> then <code>ROUTE_RECALCULATED</code> within 50ms.</li>
+                <li><span class="check">✓</span> <strong>Live Route:</strong> Changes dynamically from <code>PC1→SW1→R1→R2→SW2→PC2</code> to <code>...R1→R3→SW2...</code></li>
+                <li><span class="check">✓</span> <strong>Packet Delivery Ratio:</strong> Maintains 100.0% PDR with zero packet loss after failover.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: QoS Priority Scheduling -->
+      <div class="playbook-pane" id="tab-qos">
+        <div class="playbook-grid">
+          <!-- Left: Visual Queue Diagram -->
+          <div class="playbook-diagram-card">
+            <div class="diagram-header">
+              <span class="diagram-title">BUFFER SCHEDULER · MULTI-CLASS PRIORITY QUEUE</span>
+              <span class="status-pill status-live">PREEMPTION</span>
+            </div>
+            <div class="diagram-svg-container">
+              <svg viewBox="0 0 540 260" width="100%" height="260">
+                <!-- Ingress Pipe -->
+                <rect x="20" y="80" width="110" height="90" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" />
+                <text x="75" y="105" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#0f172a">TRAFFIC INGRESS</text>
+                <text x="75" y="125" text-anchor="middle" font-size="10" fill="#64748b">Mixed Class Stream</text>
+                <text x="75" y="145" text-anchor="middle" font-size="10" fill="#64748b">Video + Emergency</text>
+
+                <!-- Arrow into Queues -->
+                <line x1="130" y1="125" x2="160" y2="125" stroke="#475569" stroke-width="2" />
+                <polygon points="160,125 152,120 152,130" fill="#475569" />
+
+                <!-- Queue 1: Emergency (Priority 5.0) -->
+                <g transform="translate(165, 35)">
+                  <rect width="200" height="42" rx="5" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" />
+                  <text x="10" y="24" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#dc2626">Q1: Emergency (5.0)</text>
+                  <!-- High priority packets -->
+                  <circle cx="150" cy="21" r="8" fill="#dc2626" />
+                  <text x="150" y="24" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">E1</text>
+                  <circle cx="170" cy="21" r="8" fill="#dc2626" />
+                  <text x="170" y="24" text-anchor="middle" font-size="9" fill="#fff" font-weight="700">E2</text>
+                </g>
+
+                <!-- Queue 2: VoIP (Priority 4.0) -->
+                <g transform="translate(165, 87)">
+                  <rect width="200" height="38" rx="5" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.2" />
+                  <text x="10" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#d97706">Q2: VoIP (4.0)</text>
+                  <circle cx="160" cy="19" r="7" fill="#d97706" />
+                  <text x="160" y="22" text-anchor="middle" font-size="8" fill="#fff" font-weight="700">V1</text>
+                </g>
+
+                <!-- Queue 3: Video (Priority 3.0) -->
+                <g transform="translate(165, 135)">
+                  <rect width="200" height="42" rx="5" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5" />
+                  <text x="10" y="24" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#2563eb">Q3: Video (3.0)</text>
+                  <circle cx="130" cy="21" r="7" fill="#2563eb" />
+                  <circle cx="148" cy="21" r="7" fill="#2563eb" />
+                  <circle cx="166" cy="21" r="7" fill="#2563eb" />
+                  <circle cx="184" cy="21" r="7" fill="#2563eb" />
+                </g>
+
+                <!-- Queue 4: Best Effort (Priority 1.0) -->
+                <g transform="translate(165, 187)">
+                  <rect width="200" height="38" rx="5" fill="#f8fafc" stroke="#94a3b8" stroke-width="1" />
+                  <text x="10" y="22" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="500" fill="#64748b">Q4: HTTP / Best Effort</text>
+                  <circle cx="170" cy="19" r="6" fill="#94a3b8" />
+                </g>
+
+                <!-- Scheduler Engine Box -->
+                <rect x="390" y="65" width="130" height="130" rx="8" fill="#045137" stroke="#0f172a" stroke-width="1.5" />
+                <text x="455" y="105" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#ffffff">PRIORITY</text>
+                <text x="455" y="122" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#ffffff">SCHEDULER</text>
+                <text x="455" y="145" text-anchor="middle" font-size="10" fill="#86efac">Pops Q1 first</text>
+                <text x="455" y="160" text-anchor="middle" font-size="9" fill="#dcfce7">Preempts Q2, Q3, Q4</text>
+
+                <!-- Outgoing Egress Link -->
+                <line x1="520" y1="130" x2="540" y2="130" stroke="#045137" stroke-width="3" />
+              </svg>
+            </div>
+            <div class="diagram-legend">
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#dc2626;"></span> Emergency (Prio 5.0)</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#f59e0b;"></span> VoIP (Prio 4.0)</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#3b82f6;"></span> Video (Prio 3.0)</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#94a3b8;"></span> Best Effort (Prio 1.0)</div>
+            </div>
+          </div>
+
+          <!-- Right: Testing Instructions -->
+          <div class="playbook-guide-card">
+            <span class="guide-case-badge">TEST SCENARIO 02 · QOS PREEMPTION & SCHEDULING</span>
+            <h3 class="guide-heading">How to test QoS Preemption in the Lab.</h3>
+            <p class="guide-intro">
+              Quality of Service ensures life-safety or latency-critical data is not delayed behind heavy bulk streams. Test preemption live:
+            </p>
+
+            <div class="guide-steps-list">
+              <div class="guide-step-item">
+                <div class="step-badge-num">1</div>
+                <div class="step-text-wrap">
+                  <strong>Enable Priority Queue Policy</strong>
+                  <p>Click anywhere on the canvas background to open <strong>Lab Policies</strong>. Under <strong>Quality of Service</strong>, ensure the Scheduler dropdown is set to <code>Priority Queue</code> and click <strong>Apply QoS policy</strong>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">2</div>
+                <div class="step-text-wrap">
+                  <strong>Send Background Bulk Video Traffic</strong>
+                  <p>Click <strong>PC1</strong>. Configure Destination = <code>PC2</code>, Class = <code>Video</code>, Packets = <code>30</code>, Rate = <code>5 pps</code>. Click <strong>Start traffic</strong>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">3</div>
+                <div class="step-text-wrap">
+                  <strong>Inject Emergency Traffic While Video is Queued</strong>
+                  <p>Immediately while Video packets are draining, change Class to <code>Emergency</code>, Packets = <code>5</code>, and click <strong>Start traffic</strong>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">4</div>
+                <div class="step-text-wrap">
+                  <strong>Watch Priority Overtaking in Real-Time</strong>
+                  <p>Emergency packets instantly jump to the front of the queue, popping out onto the wire ahead of the waiting Video packets.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="observation-box">
+              <div class="observation-header">
+                <span>VERIFICATION CHECKLIST</span>
+              </div>
+              <ul class="observation-list">
+                <li><span class="check">✓</span> <strong>Queue Preemption:</strong> Emergency packets are delivered first with ~<code>20ms</code> latency.</li>
+                <li><span class="check">✓</span> <strong>Video Queuing Delay:</strong> Remaining Video packets safely wait in queue with higher delay (~<code>2000ms+</code>) without drops.</li>
+                <li><span class="check">✓</span> <strong>WFQ Comparison:</strong> Switch to <code>WFQ</code> to observe proportional interleaved service (3:1 ratio).</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Token Bucket Traffic Shaping -->
+      <div class="playbook-pane" id="tab-shaper">
+        <div class="playbook-grid">
+          <!-- Left: Shaper Diagram -->
+          <div class="playbook-diagram-card">
+            <div class="diagram-header">
+              <span class="diagram-title">TOKEN BUCKET ALGORITHM · RATE REGULATION & BURSTS</span>
+              <span class="status-pill status-live">SHAPED</span>
+            </div>
+            <div class="diagram-svg-container">
+              <svg viewBox="0 0 540 260" width="100%" height="260">
+                <!-- Token Generator -->
+                <circle cx="100" cy="70" r="28" fill="#ecfdf5" stroke="#045137" stroke-width="1.8" />
+                <text x="100" y="65" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#045137">TOKEN GEN</text>
+                <text x="100" y="80" text-anchor="middle" font-size="9" fill="#15803d">Rate: r tokens/s</text>
+
+                <!-- Tokens dripping into bucket -->
+                <line x1="100" y1="98" x2="100" y2="135" stroke="#045137" stroke-width="2" stroke-dasharray="3,3" />
+                <polygon points="100,135 96,128 104,128" fill="#045137" />
+
+                <!-- The Bucket -->
+                <path d="M 60,140 L 70,220 L 130,220 L 140,140" fill="#f0fdf4" stroke="#045137" stroke-width="2" />
+                <text x="100" y="175" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#045137">BUCKET</text>
+                <text x="100" y="190" text-anchor="middle" font-size="9" fill="#15803d">Capacity: C</text>
+
+                <!-- Incoming Packets Buffer -->
+                <g transform="translate(180, 100)">
+                  <rect width="130" height="70" rx="6" fill="#fff7ed" stroke="#ea580c" stroke-width="1.5" />
+                  <text x="65" y="24" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#c2410c">SHAPER QUEUE</text>
+                  <text x="65" y="42" text-anchor="middle" font-size="9" fill="#9a3412">Excess packets wait</text>
+                  <text x="65" y="56" text-anchor="middle" font-size="9" fill="#9a3412">for new tokens</text>
+                </g>
+
+                <!-- Regulator Decision Point -->
+                <polygon points="360,135 390,110 420,135 390,160" fill="#045137" stroke="#0f172a" stroke-width="1.5" />
+                <text x="390" y="138" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="9" font-weight="700" fill="#ffffff">TOKENS?</text>
+
+                <!-- Allowed Flow (Yes) -->
+                <line x1="420" y1="135" x2="520" y2="135" stroke="#16a34a" stroke-width="2.5" />
+                <polygon points="520,135 512,130 512,140" fill="#16a34a" />
+                <text x="470" y="125" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#16a34a">TRANSMIT</text>
+                <text x="470" y="155" text-anchor="middle" font-size="9" fill="#64748b">Tokens consumed</text>
+
+                <!-- Wait Flow (No) -->
+                <path d="M 390,160 L 390,200 L 245,200 L 245,170" fill="none" stroke="#ea580c" stroke-width="1.8" stroke-dasharray="4,3" />
+                <text x="320" y="215" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="9" font-weight="600" fill="#c2410c">BUFFER UNTIL TOKENS REFILL</text>
+              </svg>
+            </div>
+            <div class="diagram-legend">
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#045137;"></span> Token Generation (r)</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#ea580c;"></span> Queue Buffer Delay</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#16a34a;"></span> Regulated Transmission</div>
+            </div>
+          </div>
+
+          <!-- Right: Testing Instructions -->
+          <div class="playbook-guide-card">
+            <span class="guide-case-badge">TEST SCENARIO 03 · TOKEN BUCKET REGULATION</span>
+            <h3 class="guide-heading">How to test Traffic Shaping in the Lab.</h3>
+            <p class="guide-intro">
+              Token Bucket algorithm smooths traffic bursts and enforces service level agreements without dropping compliant packets.
+            </p>
+
+            <div class="guide-steps-list">
+              <div class="guide-step-item">
+                <div class="step-badge-num">1</div>
+                <div class="step-text-wrap">
+                  <strong>Open Traffic Shaping Panel</strong>
+                  <p>Click on the background to open policies, then click <strong>Open Traffic Shaping panel</strong>. Set <strong>Status</strong> to <code>ENABLED</code>, <strong>Rate</strong> to <code>5 packets/s</code>, and <strong>Capacity</strong> to <code>10</code>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">2</div>
+                <div class="step-text-wrap">
+                  <strong>Test Burst Within Capacity (Immediate Flow)</strong>
+                  <p>Click <strong>PC1</strong>, select Destination = <code>Server1</code>, Packets = <code>8</code>, click <strong>Start traffic</strong>. All 8 packets transmit instantly without queuing delay because 8 &le; 10 capacity.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">3</div>
+                <div class="step-text-wrap">
+                  <strong>Test Burst Exceeding Capacity (Rate Regulated)</strong>
+                  <p>Send a larger burst of <strong>20 packets</strong>. Observe: the first 10 packets consume all available tokens and transmit immediately. The remaining 10 packets buffer in the shaper queue.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">4</div>
+                <div class="step-text-wrap">
+                  <strong>Observe Paced Release & Shaping Delay</strong>
+                  <p>As tokens accumulate at 5/sec, packets release into the scheduler in exact steady cadence. In the packet viewer, each delayed packet displays its measured <strong>Shaping delay</strong>.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="observation-box">
+              <div class="observation-header">
+                <span>VERIFICATION CHECKLIST</span>
+              </div>
+              <ul class="observation-list">
+                <li><span class="check">✓</span> <strong>Queue Counter:</strong> Displays active shaping queue count: <code>(N shaping)</code>.</li>
+                <li><span class="check">✓</span> <strong>Shaping Delay:</strong> Measured in milliseconds on packets exceeding token capacity.</li>
+                <li><span class="check">✓</span> <strong>Zero Loss:</strong> Unlike hard policing, shaping queues rather than drops excess packets.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 4: Layer 2 / Layer 3 Discovery -->
+      <div class="playbook-pane" id="tab-diagnostics">
+        <div class="playbook-grid">
+          <!-- Left: L2 / L3 Diagram -->
+          <div class="playbook-diagram-card">
+            <div class="diagram-header">
+              <span class="diagram-title">PROTOCOL STACK · MAC LEARNING & ARP RESOLUTION</span>
+              <span class="status-pill status-live">DUAL-STACK</span>
+            </div>
+            <div class="diagram-svg-container">
+              <svg viewBox="0 0 540 260" width="100%" height="260">
+                <!-- Switch MAC Table Box -->
+                <rect x="30" y="30" width="220" height="200" rx="8" fill="#f8fafc" stroke="#045137" stroke-width="1.8" />
+                <rect x="30" y="30" width="220" height="34" rx="8" fill="#045137" />
+                <text x="140" y="52" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#ffffff">SWITCH 1 · MAC TABLE</text>
+                
+                <!-- Table Rows -->
+                <text x="50" y="85" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#475569">MAC ADDRESS</text>
+                <text x="190" y="85" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#475569">PORT</text>
+                <line x1="40" y1="92" x2="240" y2="92" stroke="#e2e8f0" stroke-width="1" />
+
+                <text x="50" y="112" font-family="'JetBrains Mono', monospace" font-size="10" fill="#0f172a">00:1A:2B:3C:4D:01</text>
+                <text x="195" y="112" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#045137">eth0 (PC1)</text>
+
+                <text x="50" y="136" font-family="'JetBrains Mono', monospace" font-size="10" fill="#0f172a">00:1A:2B:3C:4D:02</text>
+                <text x="195" y="136" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#045137">eth1 (R1)</text>
+
+                <text x="50" y="160" font-family="'JetBrains Mono', monospace" font-size="10" fill="#64748b">FF:FF:FF:FF:FF:FF</text>
+                <text x="195" y="160" font-family="'JetBrains Mono', monospace" font-size="10" fill="#64748b">FLOOD ALL</text>
+
+                <rect x="45" y="180" width="190" height="36" rx="4" fill="#ecfdf5" stroke="#bbf7d0" stroke-width="1" />
+                <text x="140" y="196" text-anchor="middle" font-size="9.5" fill="#166534">Learns on frame ingress;</text>
+                <text x="140" y="208" text-anchor="middle" font-size="9.5" fill="#166534">forwards known unicast directly</text>
+
+                <!-- Host ARP Cache Box -->
+                <rect x="290" y="30" width="220" height="200" rx="8" fill="#f8fafc" stroke="#2563eb" stroke-width="1.8" />
+                <rect x="290" y="30" width="220" height="34" rx="8" fill="#2563eb" />
+                <text x="400" y="52" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="700" fill="#ffffff">HOST PC1 · ARP CACHE</text>
+
+                <!-- ARP Table Rows -->
+                <text x="310" y="85" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#475569">IP ADDRESS</text>
+                <text x="420" y="85" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#475569">HARDWARE MAC</text>
+                <line x1="300" y1="92" x2="500" y2="92" stroke="#e2e8f0" stroke-width="1" />
+
+                <text x="310" y="112" font-family="'JetBrains Mono', monospace" font-size="10" fill="#0f172a">192.168.1.1</text>
+                <text x="420" y="112" font-family="'JetBrains Mono', monospace" font-size="9.5" fill="#2563eb">00:1A:..:R1</text>
+
+                <text x="310" y="136" font-family="'JetBrains Mono', monospace" font-size="10" fill="#0f172a">192.168.1.254</text>
+                <text x="420" y="136" font-family="'JetBrains Mono', monospace" font-size="9.5" fill="#2563eb">00:1A:..:GATE</text>
+
+                <rect x="305" y="180" width="190" height="36" rx="4" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1" />
+                <text x="400" y="196" text-anchor="middle" font-size="9.5" fill="#1e40af">Resolves Layer 3 IP to</text>
+                <text x="400" y="208" text-anchor="middle" font-size="9.5" fill="#1e40af">Layer 2 MAC before frame dispatch</text>
+              </svg>
+            </div>
+            <div class="diagram-legend">
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#045137;"></span> Layer 2 Port Learning</div>
+              <div class="diagram-legend-item"><span class="legend-indicator" style="background:#2563eb;"></span> Layer 3 IP Resolution</div>
+            </div>
+          </div>
+
+          <!-- Right: Testing Instructions -->
+          <div class="playbook-guide-card">
+            <span class="guide-case-badge">TEST SCENARIO 04 · MAC & ARP DISCOVERY</span>
+            <h3 class="guide-heading">How to inspect MAC & ARP in the Lab.</h3>
+            <p class="guide-intro">
+              Inspect how Ethernet switches construct local MAC tables and how hosts query ARP tables before sending IP packets.
+            </p>
+
+            <div class="guide-steps-list">
+              <div class="guide-step-item">
+                <div class="step-badge-num">1</div>
+                <div class="step-text-wrap">
+                  <strong>Inspect Switch MAC Table Before Traffic</strong>
+                  <p>Click on <strong>SW1</strong>. Scroll down the Inspector to <strong>MAC address table</strong>. Notice it initially reports no learned entries for hosts that haven't transmitted.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">2</div>
+                <div class="step-text-wrap">
+                  <strong>Transmit Packet & Observe Learning</strong>
+                  <p>Click <strong>PC1</strong> and send 1 packet to <strong>PC2</strong>. As the frame passes through SW1, SW1 inspects the source MAC and binds it to port <code>eth0</code>.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">3</div>
+                <div class="step-text-wrap">
+                  <strong>Highlight Port on Canvas</strong>
+                  <p>Click the newly learned MAC entry in the Inspector table. The physical link connecting PC1 to SW1 will highlight in green on the canvas.</p>
+                </div>
+              </div>
+
+              <div class="guide-step-item">
+                <div class="step-badge-num">4</div>
+                <div class="step-text-wrap">
+                  <strong>Run ICMP Echo Diagnostic (Ping)</strong>
+                  <p>Select <strong>PC1</strong>, set Protocol to <code>ICMP Echo</code>, Destination = <code>PC2</code>, and click <strong>Start traffic</strong>. Observe real ARP cache resolution and measured round-trip time.</p>
+                </div>
+              </div>
+            </div>
+
+            <div class="observation-box">
+              <div class="observation-header">
+                <span>VERIFICATION CHECKLIST</span>
+              </div>
+              <ul class="observation-list">
+                <li><span class="check">✓</span> <strong>Dynamic Learning:</strong> Switch learns source MACs automatically upon frame arrival.</li>
+                <li><span class="check">✓</span> <strong>Unicast Forwarding:</strong> Subsequent traffic to learned MACs is forwarded directly without flooding.</li>
+                <li><span class="check">✓</span> <strong>ARP Cache:</strong> Can be inspected and cleared via <code>clear_arp</code> or console command <code>arp -d</code>.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
   <section class="final-cta">
     <div class="max-w-content cta-box">
       <div class="eyebrow">

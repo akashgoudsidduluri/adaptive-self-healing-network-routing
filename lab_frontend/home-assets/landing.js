@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initFaultSimulation();
   initPathToggle();
   initQoSToggle();
+  initPlaybookTabs();
   initMobileMenu();
 });
 
@@ -398,4 +399,26 @@ function initMobileMenu() {
       }
     });
   }
+}
+
+// -------------------------------------------------------------
+// Interactive Lab Playbook Tabs
+// -------------------------------------------------------------
+function initPlaybookTabs() {
+  const tabButtons = document.querySelectorAll('.playbook-tab-btn');
+  const tabPanes = document.querySelectorAll('.playbook-pane');
+
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.dataset.tab;
+      tabButtons.forEach(b => b.classList.remove('active'));
+      tabPanes.forEach(p => p.classList.remove('active'));
+
+      btn.classList.add('active');
+      const targetPane = document.getElementById(targetId);
+      if (targetPane) {
+        targetPane.classList.add('active');
+      }
+    });
+  });
 }

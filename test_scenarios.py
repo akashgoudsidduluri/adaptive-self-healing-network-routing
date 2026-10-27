@@ -668,7 +668,7 @@ def test_export_writes_real_csv_data(tmp_path):
     for path in written:
         assert os.path.getsize(path) > 0
 
-    summary_csv = (tmp_path / "scenario_summary.csv").read_text()
+    summary_csv = (tmp_path / "scenario_summary.csv").read_text(encoding="utf-8")
     assert "Scenario" in summary_csv.splitlines()[0]
     assert "H1 → R1" in summary_csv
 
